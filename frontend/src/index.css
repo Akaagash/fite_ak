@@ -1,0 +1,174 @@
+@import "tailwindcss";
+
+@theme {
+    --color-primary: #46ec13;
+    --color-background-light: #f6f8f6;
+    --color-background-dark: #142210;
+    --color-surface-dark: #1e271c;
+    --color-border-dark: #2c3928;
+    --font-display: Manrope, sans-serif;
+}
+
+/* Custom Scrollbar Styling */
+* {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
+}
+
+*::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+*::-webkit-scrollbar-track {
+    background: transparent;
+    border-radius: 10px;
+}
+
+*::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 10px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+    transition: background 0.2s ease;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.2);
+    background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-corner {
+    background: transparent;
+}
+
+/* For daily mode - green accent */
+.scrollbar-daily::-webkit-scrollbar-thumb {
+    background: rgba(16, 185, 129, 0.3);
+    background-clip: padding-box;
+}
+
+.scrollbar-daily::-webkit-scrollbar-thumb:hover {
+    background: rgba(16, 185, 129, 0.5);
+    background-clip: padding-box;
+}
+
+/* For longterm mode - amber accent */
+.scrollbar-longterm::-webkit-scrollbar-thumb {
+    background: rgba(245, 158, 11, 0.3);
+    background-clip: padding-box;
+}
+
+.scrollbar-longterm::-webkit-scrollbar-thumb:hover {
+    background: rgba(245, 158, 11, 0.5);
+    background-clip: padding-box;
+}
+
+/* Hide scrollbar but keep functionality */
+.scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+}
+
+.scrollbar-hide::-webkit-scrollbar {
+    display: none;
+}
+
+/* Smooth scrolling */
+html {
+    scroll-behavior: smooth;
+}
+
+/* Dark theme base */
+body {
+    background: #0a0a0a;
+    color: white;
+}
+
+/* Range input styling */
+input[type="range"] {
+    -webkit-appearance: none;
+    appearance: none;
+    background: transparent;
+    cursor: pointer;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    height: 18px;
+    width: 18px;
+    border-radius: 50%;
+    background: white;
+    margin-top: -7px;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+}
+
+input[type="range"]::-moz-range-thumb {
+    height: 18px;
+    width: 18px;
+    border-radius: 50%;
+    background: white;
+    border: none;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+}
+
+input[type="range"]::-webkit-slider-runnable-track {
+    height: 4px;
+    border-radius: 2px;
+}
+
+input[type="range"]::-moz-range-track {
+    height: 4px;
+    border-radius: 2px;
+}
+
+/* Custom tooltip for Leaflet map markers */
+.custom-tooltip {
+    background-color: rgba(0, 0, 0, 0.85) !important;
+    border: 1px solid rgba(255, 255, 255, 0.2) !important;
+    border-radius: 8px !important;
+    color: white !important;
+    font-size: 12px !important;
+    font-weight: 600 !important;
+    padding: 6px 12px !important;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3) !important;
+}
+
+.custom-tooltip::before {
+    border-top-color: rgba(0, 0, 0, 0.85) !important;
+}
+
+/* Leaflet Map Enhancements */
+.leaflet-container {
+    font-family: 'Manrope', sans-serif !important;
+}
+
+.leaflet-popup-content-wrapper {
+    border-radius: 12px !important;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2) !important;
+}
+
+.leaflet-popup-tip {
+    box-shadow: 0 3px 14px rgba(0, 0, 0, 0.1) !important;
+}
+
+/* Custom marker animations */
+@keyframes markerPulse {
+    0%, 100% {
+        transform: scale(1);
+        opacity: 1;
+    }
+    50% {
+        transform: scale(1.05);
+        opacity: 0.8;
+    }
+}
+
+.custom-job-marker {
+    animation: markerPulse 2s ease-in-out infinite;
+}
+
+.user-location-marker {
+    filter: drop-shadow(0 2px 8px rgba(59, 130, 246, 0.4));
+}
