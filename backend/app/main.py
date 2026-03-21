@@ -3,6 +3,8 @@ FastAPI Application Entry Point
 Initializes the application, database connection, and routes
 """
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+import os
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from app.core.database import Database
@@ -29,12 +31,18 @@ async def lifespan(app: FastAPI):
 
 
 # Create FastAPI application instance
+
+# Serve uploaded resumes at /static/resumes/
+uploads_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads", "resumes")
+os.makedirs(uploads_dir, exist_ok=True)
+
 app = FastAPI(
     title="FITE API",
     description="Backend API for FITE - Job Marketplace Platform",
     version="1.0.0",
     lifespan=lifespan
 )
+app.mount("/static/resumes", StaticFiles(directory=uploads_dir), name="resumes")
 
 
 # Configure CORS middleware

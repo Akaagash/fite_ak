@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
-import { User, Lock, Briefcase, Bell, LogOut, Edit, CheckCircle, CloudUpload, FileText, Trash2, MapPin } from 'lucide-react';
+import { User, Lock, Briefcase, Bell, LogOut, Edit, CheckCircle, CloudUpload, FileText, MapPin } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { useMode } from '../context/ModeContext';
+import { useAuth } from '../context/AuthContext';
 
 const UserSettings: React.FC = () => {
     const [radius, setRadius] = useState(25);
@@ -9,6 +10,10 @@ const UserSettings: React.FC = () => {
     const [notifications, setNotifications] = useState(true);
     const [activeTab, setActiveTab] = useState('profile');
     const { mode } = useMode();
+    const { user, checkAuth } = useAuth();
+    const [resumeUrl, setResumeUrl] = useState<string | null>(user?.resume_url || null);
+    const [uploading, setUploading] = useState(false);
+    const [uploadError, setUploadError] = useState<string | null>(null);
 
     const isDaily = mode === 'daily';
 
@@ -19,8 +24,43 @@ const UserSettings: React.FC = () => {
         { id: 'notifications', label: 'Notifications', icon: Bell },
     ];
 
+    const handleResumeUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        if (file.type !== 'application/pdf') {
+            setUploadError('Only PDF files are allowed.');
+            return;
+        }
+        setUploading(true);
+        setUploadError(null);
+        try {
+            const formData = new FormData();
+            formData.append('file', file);
+            const token = localStorage.getItem('token');
+            const res = await fetch('http://localhost:8000/api/auth/upload-resume', {
+                method: 'POST',
+                body: formData,
+                credentials: 'include',
+                headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.detail || 'Upload failed');
+            setResumeUrl(data.resume_url);
+            // Refresh auth context so other pages see the updated resume_url
+            try {
+                await checkAuth();
+            } catch (_e) {
+                // ignore
+            }
+        } catch (err: any) {
+            setUploadError(err.message || 'Upload failed');
+        } finally {
+            setUploading(false);
+        }
+    };
+
     return (
-        <div className="w-full min-h-screen relative px-4 md:px-8 pt-8 pb-10">
+        <div className="w-full min-h-screen relative z-[200] px-4 md:px-8 pt-8 pb-10">
             <div className="mx-auto w-full max-w-6xl">
                 {/* Header */}
                 <div className="flex items-center justify-between mb-8">
@@ -142,27 +182,30 @@ const UserSettings: React.FC = () => {
                                     <h3 className="text-lg font-bold text-neutral-900">Professional Documents</h3>
                                     <span className="text-xs font-semibold text-neutral-500 bg-neutral-100 px-3 py-1.5 rounded-lg">PDF only, Max 5MB</span>
                                 </div>
-                                <div className={`border-2 border-dashed ${isDaily ? 'border-emerald-300 bg-emerald-50/50' : 'border-amber-300 bg-amber-50/50'} rounded-2xl p-8 flex flex-col items-center justify-center text-center cursor-pointer hover:bg-opacity-70 transition-colors group`}>
+                                <label className={`border-2 border-dashed ${isDaily ? 'border-emerald-300 bg-emerald-50/50' : 'border-amber-300 bg-amber-50/50'} rounded-2xl p-8 flex flex-col items-center justify-center text-center cursor-pointer hover:bg-opacity-70 transition-colors group`}
+                                    style={{ opacity: uploading ? 0.6 : 1 }}>
+                                    <input type="file" accept="application/pdf" className="hidden" onChange={handleResumeUpload} disabled={uploading} />
                                     <div className="bg-white p-3 rounded-full shadow-sm mb-4 group-hover:scale-110 transition-transform">
                                         <CloudUpload size={28} className={isDaily ? 'text-emerald-600' : 'text-amber-600'} />
                                     </div>
-                                    <p className="text-neutral-900 font-bold mb-1">Upload Updated Resume</p>
+                                    <p className="text-neutral-900 font-bold mb-1">{uploading ? 'Uploading...' : 'Upload Updated Resume'}</p>
                                     <p className="text-neutral-500 text-sm font-medium">Drag and drop or click to browse</p>
-                                </div>
-                                <div className="mt-4 flex items-center justify-between p-4 bg-neutral-50 rounded-xl border-2 border-neutral-100">
-                                    <div className="flex items-center gap-3">
-                                        <div className="bg-red-100 text-red-600 p-2.5 rounded-xl">
-                                            <FileText size={20} />
-                                        </div>
-                                        <div>
-                                            <p className="text-sm font-bold text-neutral-900">Athish_Resume_2024.pdf</p>
-                                            <p className="text-xs text-neutral-500 font-medium">Uploaded 2 days ago • 2.4 MB</p>
+                                    {uploadError && <span className="text-red-600 text-xs mt-2">{uploadError}</span>}
+                                </label>
+                                {resumeUrl && (
+                                    <div className="mt-4 flex items-center justify-between p-4 bg-neutral-50 rounded-xl border-2 border-neutral-100 relative z-50">
+                                        <div className="flex items-center gap-3">
+                                            <div className="bg-red-100 text-red-600 p-2.5 rounded-xl">
+                                                <FileText size={20} />
+                                            </div>
+                                            <div>
+                                                {/* Resolve relative resume urls to backend origin if needed */}
+                                                <a href={resumeUrl.startsWith('/') ? `http://localhost:8000${resumeUrl}` : resumeUrl} target="_blank" rel="noopener noreferrer" className="text-sm font-bold text-neutral-900 underline">View Resume</a>
+                                                <p className="text-xs text-neutral-500 font-medium">PDF • Uploaded</p>
+                                            </div>
                                         </div>
                                     </div>
-                                    <button className="text-neutral-400 hover:text-red-500 transition-colors p-2">
-                                        <Trash2 size={18} />
-                                    </button>
-                                </div>
+                                )}
                             </motion.div>
 
                             {/* App Preferences */}

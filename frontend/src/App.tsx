@@ -23,6 +23,9 @@ import AppliedJobs from './pages/applied-jobs/AppliedJobs';
 // Explore Jobs pages
 import ExploreJobs from './pages/explore-jobs/ExploreJobs';
 
+// Apply page
+import ApplyJob from './pages/apply-job/ApplyJob';
+
 // Job Responses pages
 import JobResponses from './pages/job-responses/JobResponses';
 
@@ -53,6 +56,7 @@ const App: React.FC = () => {
                 <Route path="post-daily-job" element={<PostDailyJob />} />
                 <Route path="post-long-term-job" element={<PostLongTermJob />} />
                 <Route path="applied-jobs" element={<AppliedJobs />} />
+                <Route path="apply/:jobId" element={<ApplyJob />} />
                 <Route path="explore-jobs" element={<ExploreJobs />} />
                 <Route path="settings" element={<UserSettings />} />
               </Route>

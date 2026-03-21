@@ -21,3 +21,7 @@ python-dotenv==1.0.0
 email-validator==2.1.0
 
 # CORS Support (included in FastAPI)
+# Machine learning for resume-job matching
+# scikit-learn and sentence-transformers removed for local dev on Windows without build tools
+# scikit-learn==1.2.2
+# sentence-transformers==2.2.2

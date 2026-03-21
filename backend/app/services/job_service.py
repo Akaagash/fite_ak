@@ -40,6 +40,22 @@ class JobService:
             job_dict["status"] = "open"
             
             # Insert job into database
+            # Try to compute semantic embedding for job (title+description+skills+requirements)
+            try:
+                from sentence_transformers import SentenceTransformer
+                model = SentenceTransformer('all-MiniLM-L6-v2')
+                parts = [job_dict.get('title', ''), job_dict.get('description', '')]
+                if isinstance(job_dict.get('skills_required'), list):
+                    parts.extend([s for s in job_dict.get('skills_required') if isinstance(s, str)])
+                if isinstance(job_dict.get('requirements'), list):
+                    parts.extend([s for s in job_dict.get('requirements') if isinstance(s, str)])
+                text = " ".join(parts)
+                if text.strip():
+                    emb = model.encode(text)
+                    job_dict['embedding'] = emb.tolist() if hasattr(emb, 'tolist') else list(map(float, emb))
+            except Exception:
+                pass
+
             result = await jobs_collection.insert_one(job_dict)
             job_dict["_id"] = str(result.inserted_id)
             
@@ -266,10 +282,14 @@ class JobService:
             if not job:
                 return None
             
-            # Check if user already applied
-            existing = await applications_collection.find_one({"job_id": job_id, "applicant_id": user_id})
+            # Check if user already applied; only block if there's an active application
+            existing = await applications_collection.find_one({
+                "job_id": job_id,
+                "applicant_id": user_id,
+                "status": {"$nin": ["cancelled", "completed", "rejected"]}
+            })
             if existing:
-                return None  # Already applied
+                return None  # Already applied (active application exists)
             
             # Create application
             application = {

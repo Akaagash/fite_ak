@@ -52,3 +52,5 @@ frontend/dist/
 Thumbs.db
 ehthumbs.db
 worker2_cookies.json
+worker2_cookies.json
+backend/app/uploads/

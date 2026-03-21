@@ -1,82 +1,90 @@
-import React, { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import React, { useState, useEffect } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
 import { ChevronLeft, Phone, Mail, MapPin, Star, Calendar, Briefcase, Download, X, FileText, LayoutGrid, List } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { useAuth } from '../../context/AuthContext';
 
 interface Applicant {
-    id: number;
+    id: string;
+    applicant_id?: string;
     name: string;
     avatar: string;
-    rating: number;
-    experience: string;
-    location: string;
-    phone: string;
-    email: string;
-    appliedAt: string;
-    skills: string[];
-    bio: string;
+    rating?: number;
+    experience?: string;
+    location?: string;
+    phone?: string;
+    email?: string;
+    appliedAt?: string;
+    skills?: string[];
+    bio?: string;
 }
 
 const Applicants: React.FC = () => {
     const navigate = useNavigate();
+    const params = useParams();
+    const { jobId } = params as { jobId?: string };
+    const { user } = useAuth();
+
     const [selectedApplicant, setSelectedApplicant] = useState<Applicant | null>(null);
     const [viewMode, setViewMode] = useState<'card' | 'list'>('card');
+    const [applicants, setApplicants] = useState<Applicant[]>([]);
+    const [loading, setLoading] = useState<boolean>(true);
+    const [error, setError] = useState<string | null>(null);
 
-    // Mock applicants data
-    const applicants: Applicant[] = [
-        {
-            id: 1,
-            name: "Rajesh Kumar",
-            avatar: "https://i.pravatar.cc/150?img=12",
-            rating: 4.8,
-            experience: "5 years",
-            location: "Indiranagar, Bangalore",
-            phone: "+91 98765 43210",
-            email: "rajesh.kumar@email.com",
-            appliedAt: "2 hours ago",
-            skills: ["React", "TypeScript", "Node.js", "MongoDB"],
-            bio: "Experienced full-stack developer with a passion for building scalable web applications. Specialized in React and Node.js ecosystems with strong problem-solving skills."
-        },
-        {
-            id: 2,
-            name: "Priya Sharma",
-            avatar: "https://i.pravatar.cc/150?img=5",
-            rating: 4.9,
-            experience: "3 years",
-            location: "Koramangala, Bangalore",
-            phone: "+91 98765 43211",
-            email: "priya.sharma@email.com",
-            appliedAt: "5 hours ago",
-            skills: ["UI/UX", "Figma", "Adobe XD", "Prototyping"],
-            bio: "Creative UI/UX designer focused on user-centered design principles. Expert in creating intuitive interfaces and seamless user experiences across web and mobile platforms."
-        },
-        {
-            id: 3,
-            name: "Amit Patel",
-            avatar: "https://i.pravatar.cc/150?img=8",
-            rating: 4.7,
-            experience: "4 years",
-            location: "Whitefield, Bangalore",
-            phone: "+91 98765 43212",
-            email: "amit.patel@email.com",
-            appliedAt: "1 day ago",
-            skills: ["Python", "Django", "PostgreSQL", "Docker"],
-            bio: "Backend developer specializing in Python and Django. Strong experience in database optimization, API design, and cloud infrastructure deployment."
-        },
-        {
-            id: 4,
-            name: "Sneha Reddy",
-            avatar: "https://i.pravatar.cc/150?img=9",
-            rating: 4.6,
-            experience: "2 years",
-            location: "HSR Layout, Bangalore",
-            phone: "+91 98765 43213",
-            email: "sneha.reddy@email.com",
-            appliedAt: "2 days ago",
-            skills: ["Java", "Spring Boot", "Microservices", "Kafka"],
-            bio: "Java developer with expertise in building microservices architecture. Passionate about clean code and modern software development practices."
-        }
-    ];
+    useEffect(() => {
+        const fetchApplicants = async () => {
+            if (!jobId) {
+                setError('Missing job id');
+                setLoading(false);
+                return;
+            }
+
+            setLoading(true);
+            setError(null);
+            try {
+                const token = localStorage.getItem('token');
+                const resp = await fetch(`http://localhost:8000/api/jobs/${jobId}/applicants`, {
+                    method: 'GET',
+                    credentials: 'include',
+                    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+                });
+
+                if (resp.status === 401 || resp.status === 403) {
+                    setError('Not authorized to view applicants. Please login as the job poster.');
+                    setApplicants([]);
+                } else if (!resp.ok) {
+                    const txt = await resp.text();
+                    setError(`Failed to fetch applicants: ${txt}`);
+                    setApplicants([]);
+                } else {
+                    const data = await resp.json();
+                    const mapped: Applicant[] = (data.applicants || []).map((a: any, idx: number) => ({
+                        id: a._id || String(idx),
+                        applicant_id: a.applicant_id,
+                        name: a.applicant_name || a.applicant_id || 'Applicant',
+                        avatar: `https://i.pravatar.cc/150?u=${a.applicant_id || a._id || idx}`,
+                        rating: a.rating || 0,
+                        experience: a.experience || 'N/A',
+                        location: a.location || 'Unknown',
+                        phone: a.applicant_contact || '',
+                        email: a.applicant_email || '',
+                        appliedAt: a.applied_at ? new Date(a.applied_at).toLocaleString() : (a.appliedAt || ''),
+                        skills: a.skills || [],
+                        bio: a.cover_letter || a.bio || '',
+                    }));
+                    setApplicants(mapped);
+                }
+            } catch (e: any) {
+                console.error('Failed fetching applicants', e);
+                setError('Failed to fetch applicants');
+                setApplicants([]);
+            } finally {
+                setLoading(false);
+            }
+        };
+
+        fetchApplicants();
+    }, [jobId, user]);
 
     return (
         <div className="w-full min-h-screen relative px-4 md:px-8 pt-8 pb-10">

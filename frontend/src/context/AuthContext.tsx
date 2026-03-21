@@ -1,8 +1,17 @@
 import React, { createContext, useContext, useState, useEffect, type ReactNode } from 'react';
 
 interface User {
+    user_id?: string;
     email: string;
     role: string;
+    full_name?: string;
+    resume_url?: string;
+    phone?: string;
+    address?: string;
+    city?: string;
+    state?: string;
+    skills?: string[] | null;
+    experience?: string | null;
 }
 
 interface AuthContextType {
@@ -25,14 +34,16 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
      */
     const checkAuth = async () => {
         try {
+            const token = localStorage.getItem('token');
             const response = await fetch('http://localhost:8000/api/auth/me', {
                 method: 'GET',
                 credentials: 'include', // Send cookies with request
+                headers: token ? { Authorization: `Bearer ${token}` } : undefined,
             });
 
             if (response.ok) {
                 const data = await response.json();
-                setUser(data);
+                setUser(data.user ?? null);
             } else {
                 setUser(null);
             }
@@ -63,6 +74,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         } catch (error) {
             console.error('Logout failed:', error);
         } finally {
+            localStorage.removeItem('token');
             setUser(null);
         }
     };

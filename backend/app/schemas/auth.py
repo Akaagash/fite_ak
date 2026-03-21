@@ -3,7 +3,7 @@ Authentication schemas for request/response validation
 Defines Pydantic models for login and signup operations
 """
 from pydantic import BaseModel, EmailStr, Field, field_validator
-from typing import Literal
+from typing import Literal, Optional
 
 
 class SignupRequest(BaseModel):
@@ -62,6 +62,7 @@ class TokenResponse(BaseModel):
     """
     message: str = Field(..., description="Success message")
     user: dict = Field(..., description="User information")
+    access_token: Optional[str] = Field(default=None, description="JWT access token (also set as httpOnly cookie)")
     
     class Config:
         """Pydantic configuration"""
@@ -72,7 +73,8 @@ class TokenResponse(BaseModel):
                     "email": "athish@example.com",
                     "role": "hybrid",
                     "is_active": True
-                }
+                },
+                "access_token": "<jwt>"
             }
         }
 

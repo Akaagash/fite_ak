@@ -11,6 +11,16 @@ from app.schemas.application import ApplyToJobRequest, CancelApplicationRequest
 
 class ApplicationService:
     """Service class for application operations"""
+
+    @staticmethod
+    def _user_scope_query(user_id: str) -> Dict:
+        """Match applications owned by the current user (supports legacy field names)."""
+        return {
+            "$or": [
+                {"worker_id": user_id},
+                {"applicant_id": user_id},
+            ]
+        }
     
     @staticmethod
     async def get_user_applications(user_id: str, status_filter: Optional[str] = None) -> List[Dict]:
@@ -27,10 +37,10 @@ class ApplicationService:
         try:
             applications_collection = Database.get_collection("applications")
             
-            # Build query
-            query = {"worker_id": user_id}
+            # Build query (always scoped to current user)
+            query: Dict = ApplicationService._user_scope_query(user_id)
             if status_filter:
-                query["status"] = status_filter
+                query["status"] = str(status_filter).lower()
             
             # Fetch applications
             cursor = applications_collection.find(query).sort("created_at", -1)
@@ -72,26 +82,37 @@ class ApplicationService:
             if not job:
                 return None
             
-            # Check if already applied
+            # Check if already applied (supports legacy docs)
+            # Only treat as "already applied" when there exists an active application
+            # (not cancelled, not completed, not rejected).
             existing = await applications_collection.find_one({
-                "worker_id": user_id,
-                "job_id": application_data.job_id
+                "job_id": application_data.job_id,
+                **ApplicationService._user_scope_query(user_id),
+                "status": {"$nin": ["cancelled", "completed", "rejected"]}
             })
             if existing:
-                return None  # Already applied
+                return None  # Already applied (active application exists)
             
             worker_name = user_email.split("@")[0] if user_email else "Worker"
+
+            # Prefer applicant-supplied name/contact when provided
+            applicant_name = application_data.applicant_name or worker_name
+            applicant_contact = application_data.applicant_contact or user_email
 
             # Prepare application document
             application = {
                 "worker_id": user_id,
                 "applicant_id": user_id,
-                "applicant_name": worker_name,
-                "applicant_contact": user_email,
+                "applicant_name": applicant_name,
+                "applicant_contact": applicant_contact,
                 "job_id": application_data.job_id,
                 "provider_id": job.get("employer_id", ""),
                 "cover_letter": application_data.cover_letter,
                 "experience": None,
+                "applied_position": application_data.applied_position,
+                "earliest_start_date": application_data.earliest_start_date,
+                "preferred_interview_date": application_data.preferred_interview_date,
+                "other_documents": application_data.other_documents or [],
                 "job_snapshot": {
                     "title": job.get("title", ""),
                     "location": job.get("location", {}).get("address", ""),
@@ -106,7 +127,7 @@ class ApplicationService:
                 "messages": [
                     {
                         "sender": "worker",
-                        "sender_name": worker_name,
+                        "sender_name": applicant_name,
                         "message": application_data.cover_letter or "Applied to this job",
                         "offer_amount": application_data.offered_price,
                         "sent_at": datetime.utcnow(),
@@ -132,7 +153,13 @@ class ApplicationService:
             # Insert application
             result = await applications_collection.insert_one(application)
             application["_id"] = str(result.inserted_id)
-            
+
+            # Also add applicant id to job's applicants list for employer view
+            try:
+                await jobs_collection.update_one({"_id": ObjectId(application_data.job_id)}, {"$push": {"applicants": user_id}})
+            except Exception:
+                pass
+
             return application
             
         except Exception as e:
@@ -159,17 +186,18 @@ class ApplicationService:
             # Get application
             application = await applications_collection.find_one({
                 "_id": ObjectId(application_id),
-                "worker_id": user_id
+                **ApplicationService._user_scope_query(user_id),
             })
             
             if not application:
                 return {"success": False, "message": "Application not found"}
             
             # Check if already cancelled or completed
-            if application["status"] in ["cancelled", "completed", "CANCELLED", "COMPLETED"]:
-                return {"success": False, "message": f"Application is already {application['status'].lower()}"}
+            current_status = str(application.get("status", "")).lower()
+            if current_status in ["cancelled", "completed"]:
+                return {"success": False, "message": f"Application is already {current_status}"}
 
-            if application["status"] in ["accepted", "ongoing"]:
+            if current_status in ["accepted", "ongoing"]:
                 return {"success": False, "message": "Cannot cancel after assignment"}
             
             # Get job to check start time
@@ -189,15 +217,25 @@ class ApplicationService:
             
             # Cancel the application
             await applications_collection.update_one(
-                {"_id": ObjectId(application_id)},
+                {"_id": ObjectId(application_id), **ApplicationService._user_scope_query(user_id)},
                 {
                     "$set": {
-                        "status": "CANCELLED",
+                        "status": "cancelled",
                         "updated_at": datetime.utcnow()
                     }
                 }
             )
-            
+            # Also remove the applicant id from the job's applicants list so the job
+            # becomes visible again in Explore (frontend filters by job.applicants)
+            try:
+                await jobs_collection.update_one(
+                    {"_id": ObjectId(application["job_id"])},
+                    {"$pull": {"applicants": user_id}}
+                )
+            except Exception:
+                # non-fatal: log and continue
+                pass
+
             return {"success": True, "message": "Application cancelled successfully"}
             
         except Exception as e:
@@ -212,7 +250,7 @@ class ApplicationService:
             
             application = await applications_collection.find_one({
                 "_id": ObjectId(application_id),
-                "worker_id": user_id
+                **ApplicationService._user_scope_query(user_id),
             })
             
             if application:
@@ -238,7 +276,7 @@ class ApplicationService:
 
             application = await applications_collection.find_one({
                 "_id": ObjectId(application_id),
-                "worker_id": user_id,
+                **ApplicationService._user_scope_query(user_id),
             })
             if not application:
                 return None
@@ -251,20 +289,20 @@ class ApplicationService:
                 "sent_at": datetime.utcnow(),
             }
 
-            update_doc = {
-                "$push": {"messages": msg_doc},
-                "$set": {"updated_at": datetime.utcnow(), "status": "negotiating"},
-            }
-
-            if offer_amount is not None:
-                update_doc["$set"]["daily_meta.final_agreed_price"] = offer_amount
+            # Only move to 'negotiating' when the application/job is a daily-wage negotiation
+            app_type = (application.get("job_snapshot", {}) or {}).get("type")
+            update_doc = {"$push": {"messages": msg_doc}, "$set": {"updated_at": datetime.utcnow()}}
+            if app_type == 'daily':
+                update_doc["$set"]["status"] = "negotiating"
+                if offer_amount is not None:
+                    update_doc["$set"]["daily_meta.final_agreed_price"] = offer_amount
 
             await applications_collection.update_one(
-                {"_id": ObjectId(application_id), "worker_id": user_id},
+                {"_id": ObjectId(application_id), **ApplicationService._user_scope_query(user_id)},
                 update_doc,
             )
 
-            updated = await applications_collection.find_one({"_id": ObjectId(application_id), "worker_id": user_id})
+            updated = await applications_collection.find_one({"_id": ObjectId(application_id), **ApplicationService._user_scope_query(user_id)})
             if updated:
                 updated["_id"] = str(updated["_id"])
             return updated

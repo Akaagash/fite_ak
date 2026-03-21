@@ -8,6 +8,7 @@ from app.core.database import Database
 from app.core.security import hash_password, verify_password, create_access_token
 from app.models.user import UserInDB, UserResponse
 from app.schemas.auth import SignupRequest, LoginRequest
+from bson import ObjectId
 
 
 class AuthService:
@@ -96,6 +97,7 @@ class AuthService:
         # Return user data and token
         return {
             "user": {
+                "user_id": str(user["_id"]),
                 "email": user["email"],
                 "role": user["role"],
                 "is_active": user["is_active"],
@@ -130,6 +132,19 @@ class AuthService:
             is_active=user["is_active"],
             created_at=user["created_at"]
         )
+
+    @staticmethod
+    async def get_user_by_id(user_id: str) -> Optional[Dict[str, Any]]:
+        """Get full user document by MongoDB _id (string)."""
+        try:
+            users_collection = Database.get_collection("users")
+            if not ObjectId.is_valid(user_id):
+                return None
+
+            user = await users_collection.find_one({"_id": ObjectId(user_id)})
+            return user
+        except Exception:
+            return None
     
     @staticmethod
     async def verify_user_token(token: str) -> Optional[Dict[str, Any]]:
@@ -149,21 +164,45 @@ class AuthService:
         if not payload:
             return None  # Invalid or expired token
         
-        # Extract email from token
+        user_id = payload.get("sub")
         email = payload.get("email")
-        if not email:
+
+        # Prefer looking up by user_id (JWT subject). Fallback to email for older tokens.
+        user_doc: Optional[Dict[str, Any]] = None
+        if user_id:
+            user_doc = await AuthService.get_user_by_id(str(user_id))
+
+        if not user_doc and email:
+            users_collection = Database.get_collection("users")
+            user_doc = await users_collection.find_one({"email": email})
+
+        if not user_doc:
             return None
-        
-        # Get user from database
-        user = await AuthService.get_current_user(email)
-        if not user:
-            return None
-        
-        # Return user data including user_id (from token sub) and full_name
+
+        resolved_user_id = str(user_doc.get("_id", ""))
+        resolved_email = user_doc.get("email", email)
+        resolved_role = user_doc.get("role", payload.get("role", "worker"))
+        is_active = bool(user_doc.get("is_active", True))
+        full_name = user_doc.get("full_name") or (resolved_email.split("@")[0] if resolved_email else "User")
+
+        # Return a safe, frontend-ready user payload.
         return {
-            "email": user.email,
-            "role": user.role,
-            "is_active": user.is_active,
-            "user_id": payload.get("sub", ""),
-            "full_name": user.email.split("@")[0],  # use email prefix as display name
+            "user_id": resolved_user_id,
+            "email": resolved_email,
+            "role": resolved_role,
+            "is_active": is_active,
+            "created_at": user_doc.get("created_at"),
+            "updated_at": user_doc.get("updated_at"),
+            "full_name": full_name,
+            "phone": user_doc.get("phone"),
+            "address": user_doc.get("address"),
+            "city": user_doc.get("city"),
+            "state": user_doc.get("state"),
+            "skills": user_doc.get("skills"),
+            "experience": user_doc.get("experience"),
+            "resume_url": user_doc.get("resume_url"),
+            "resume_text": user_doc.get("resume_text"),
+            # include a flag or embedding if available (embedding can be large)
+            "has_resume_embedding": True if user_doc.get("resume_embedding") else False,
+            "resume_embedding": user_doc.get("resume_embedding"),
         }

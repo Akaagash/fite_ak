@@ -48,6 +48,13 @@ class ApplyToJobRequest(BaseModel):
     # For long-term jobs
     resume_url: Optional[str] = None
     cover_letter: Optional[str] = None
+    # Optional applicant-supplied fields
+    applicant_name: Optional[str] = None
+    applicant_contact: Optional[str] = None
+    applied_position: Optional[str] = None
+    earliest_start_date: Optional[datetime] = None
+    preferred_interview_date: Optional[datetime] = None
+    other_documents: Optional[List[str]] = None
 
 
 class CancelApplicationRequest(BaseModel):
@@ -69,7 +76,19 @@ class ApplicationResponse(BaseModel):
     job_id: str
     provider_id: str
     job_snapshot: JobSnapshotSchema
-    status: Literal["NEGOTIATING", "APPLIED", "COMPLETED", "CANCELLED"]
+    status: Literal[
+        "pending",
+        "negotiating",
+        "accepted",
+        "rejected",
+        "completed",
+        "cancelled",
+        # Backward-compat (older docs)
+        "NEGOTIATING",
+        "APPLIED",
+        "COMPLETED",
+        "CANCELLED",
+    ]
     daily_meta: Optional[DailyMetaSchema] = None
     long_term_meta: Optional[LongTermMetaSchema] = None
     created_at: datetime

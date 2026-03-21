@@ -59,9 +59,9 @@ async def get_my_applications(
         status_filter: Optional filter (APPLIED, COMPLETED, CANCELLED)
     """
     user = await get_current_user_from_token(access_token, authorization)
-    
-    # Use email as user_id (since that's what we store in the token)
-    user_id = user.get("email")
+
+    # Always scope by JWT subject (Mongo user _id), never by frontend-provided ids
+    user_id = user.get("user_id")
     
     applications = await ApplicationService.get_user_applications(user_id, status_filter)
     
@@ -82,8 +82,8 @@ async def apply_to_job(
     Creates a new application with job snapshot and type-specific metadata
     """
     user = await get_current_user_from_token(access_token, authorization)
-    
-    user_id = user.get("email")
+
+    user_id = user.get("user_id")
     user_email = user.get("email")
     
     application = await ApplicationService.apply_to_job(
@@ -115,8 +115,8 @@ async def cancel_application(
     Can only cancel if job starts in more than 30 minutes (for daily wage jobs)
     """
     user = await get_current_user_from_token(access_token, authorization)
-    
-    user_id = user.get("email")
+
+    user_id = user.get("user_id")
     
     result = await ApplicationService.cancel_application(
         user_id,
@@ -145,8 +145,8 @@ async def get_application(
     Only the owner can view their application
     """
     user = await get_current_user_from_token(access_token, authorization)
-    
-    user_id = user.get("email")
+
+    user_id = user.get("user_id")
     
     application = await ApplicationService.get_application_by_id(application_id, user_id)
     
@@ -171,8 +171,8 @@ async def send_application_message(
     """Worker sends a message/offer in application chat thread"""
     user = await get_current_user_from_token(access_token, authorization)
 
-    user_id = user.get("email")
-    user_name = user.get("email", "worker").split("@")[0]
+    user_id = user.get("user_id")
+    user_name = (user.get("full_name") or user.get("email") or "worker").split("@")[0]
 
     updated = await ApplicationService.send_worker_message(
         user_id=user_id,

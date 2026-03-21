@@ -51,8 +51,14 @@ const LoginSignup: React.FC = () => {
                 throw new Error(data.detail || 'Authentication failed');
             }
 
-            // Update auth context with user data
-            login({ email: data.user.email, role: data.user.role });
+            // Store JWT token (backend also sets httpOnly cookie)
+            if (data.access_token) {
+                localStorage.setItem('token', data.access_token);
+            }
+
+            // Update auth context with full user data returned from backend
+            // (includes resume_url and other profile fields)
+            login(data.user);
 
             // Authentication successful - navigate to home
             navigate('/home', { replace: true });

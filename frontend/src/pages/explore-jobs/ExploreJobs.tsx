@@ -1,7 +1,10 @@
-import React, { useEffect, useState } from 'react';
+/* eslint-disable @typescript-eslint/no-explicit-any */
+import React, { useEffect, useState, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useMode } from '../../context/ModeContext';
+import { useAuth } from '../../context/AuthContext';
 import { motion, AnimatePresence } from 'framer-motion';
-import { LayoutGrid, Map, MapPin, Clock, IndianRupee, Star, Play, Square, Loader2, Navigation, Phone, X, Briefcase, ChevronDown, Filter } from 'lucide-react';
+import { LayoutGrid, Map as MapIcon, MapPin, Clock, IndianRupee, Star, Play, Square, Loader2, Navigation, Phone, X, Briefcase, ChevronDown, Filter } from 'lucide-react';
 import TextType from '../../components/ui/TextType';
 import { LocationMap } from '../../components/ui/expand-map';
 
@@ -21,6 +24,8 @@ interface Job {
     description: string;
     postedAt: string;
     coordinates: [number, number];
+    job_type?: string;
+    employer_contact?: string;
 }
 
 interface LongTermJob {
@@ -33,10 +38,16 @@ interface LongTermJob {
     requirements: string[];
     description: string;
     postedAt: string;
+    matchScore?: number;
+    applicants?: unknown[];
+    coordinates?: [number, number];
+    employer_contact?: string;
 }
 
 const ExploreJobs: React.FC = () => {
     const { mode } = useMode();
+    const navigate = useNavigate();
+    const auth = useAuth();
     const [viewMode, setViewMode] = useState<'card' | 'map'>('card');
     const [isExploring, setIsExploring] = useState(false);
     const [userLocation, setUserLocation] = useState<[number, number] | null>(null);
@@ -52,7 +63,7 @@ const ExploreJobs: React.FC = () => {
     const [showLocationPermission, setShowLocationPermission] = useState(false);
     const [dailyJobs, setDailyJobs] = useState<Job[]>([]);
     const [longTermJobs, setLongTermJobs] = useState<LongTermJob[]>([]);
-    const [isFetchingJobs, setIsFetchingJobs] = useState(false);
+    const [, setIsFetchingJobs] = useState(false);
     const [isApplying, setIsApplying] = useState<string | null>(null);
 
     const isDaily = mode === 'daily';
@@ -75,16 +86,43 @@ const ExploreJobs: React.FC = () => {
         return `₹${amount}${suffixMap[salary.period] ?? ''}`;
     };
 
-    const fetchJobs = async () => {
+
+    const fetchJobs = useCallback(async () => {
         setIsFetchingJobs(true);
         try {
-            const [dailyRes, longRes] = await Promise.all([
-                fetch('http://localhost:8000/api/jobs?job_type=daily_wage&status=open', { credentials: 'include' }),
-                fetch('http://localhost:8000/api/jobs?job_type=long_term&status=open', { credentials: 'include' }),
-            ]);
+            const dailyRes = await fetch('http://localhost:8000/api/jobs?job_type=daily_wage&status=open', { credentials: 'include' });
+            let longRes = await fetch('http://localhost:8000/api/jobs/long-term-matches', { credentials: 'include' });
+
+            // If long-term matches requires auth and user is not authenticated, fall back
+            // to the public long-term jobs endpoint so Explore shows content to unauthenticated users.
+            if (!longRes.ok && (longRes.status === 401 || longRes.status === 403)) {
+                longRes = await fetch('http://localhost:8000/api/jobs?job_type=long_term&status=open');
+            }
 
             const dailyData = dailyRes.ok ? await dailyRes.json() : { jobs: [] };
             const longData = longRes.ok ? await longRes.json() : { jobs: [] };
+
+            // Debug logging to help troubleshoot missing jobs in the UI
+            // (visible in browser console when dev server is running)
+            // Log HTTP statuses and initial payloads
+            try {
+                console.log('ExploreJobs fetch status:', { daily: dailyRes.status, long: longRes.status });
+                console.log('ExploreJobs longData (initial):', longData);
+            } catch { /* ignore if console not available */ }
+
+            // If long-term matches returned an empty list, try the public long-term jobs endpoint
+                    if ((!longData.jobs || longData.jobs.length === 0)) {
+                try {
+                    const publicRes = await fetch('http://localhost:8000/api/jobs?job_type=long_term&status=open');
+                    if (publicRes.ok) {
+                        const pub = await publicRes.json();
+                        console.log('ExploreJobs public fallback data length:', (pub.jobs || []).length);
+                        // mutate jobs array inside longData object for compatibility with existing code
+                        // pub may be loosely typed
+                        longData.jobs = pub.jobs || [];
+                    }
+                } catch { /* ignore fallback errors */ }
+            }
 
             const mappedDaily: Job[] = (dailyData.jobs || []).map((job: any, idx: number) => ({
                 id: job._id,
@@ -114,18 +152,108 @@ const ExploreJobs: React.FC = () => {
                 requirements: Array.isArray(job.requirements) ? job.requirements : [],
                 description: job.description || '',
                 postedAt: formatTimeAgo(job.created_at),
+                        matchScore: job.matchScore || 0,
+                applicants: Array.isArray(job.applicants) ? job.applicants : (job.applicants_count ? [] : []),
             }));
 
+            // Deduplicate long-term jobs by title|company|salary keeping the highest matchScore
+            const dedupMap = new Map<string, LongTermJob>();
+            mappedLong.forEach((j) => {
+                const key = `${j.title}||${j.company}||${j.salary}`;
+                const existing = dedupMap.get(key);
+                if (!existing || (j.matchScore || 0) > (existing.matchScore || 0)) {
+                    dedupMap.set(key, j);
+                }
+            });
+            
+
             setDailyJobs(mappedDaily);
-            setLongTermJobs(mappedLong);
+
+            // If user is authenticated, remove jobs they've already applied to
+            const userId = auth.user?.user_id;
+            // compute a local fallback matchScore from resume_text when backend didn't provide one
+            let resumeText: string | undefined = (auth.user as any)?.resume_text;
+
+            // If user is authenticated but resume_text not present in context, refresh auth
+            if (auth.user && !resumeText && auth.checkAuth) {
+                try {
+                    await auth.checkAuth();
+                    resumeText = (auth.user as any)?.resume_text;
+                } catch { /* ignore */ }
+            }
+
+            const stopwords = new Set(['the','and','is','in','to','of','a','for','on','with','as','by','an','at','from','or','that','this','it','be','are','was','were','has','have','but','not']);
+
+            const computeLocalScore = (resume: string | undefined, job: LongTermJob) => {
+                try {
+                    if (!resume) return 0;
+                    const tokenize = (s = '') => (s || '').toLowerCase().match(/[a-z0-9_+#.]+/g) || [];
+
+                    const resumeTokens = tokenize(resume).filter(t => !stopwords.has(t));
+                    const resumeSet = new Set(resumeTokens);
+
+                    // Build weighted job tokens: title (weight 3), requirements (weight 2), description (weight 1)
+                    const titleTokens = tokenize(job.title || '');
+                    const reqTokens = tokenize((job.requirements || []).join(' '));
+                    const descTokens = tokenize(job.description || '');
+
+                    let scoreNumerator = 0;
+                    let scoreDenom = 0;
+
+                    // Title tokens (higher weight)
+                    scoreDenom += titleTokens.length * 3 || 1;
+                    titleTokens.forEach(t => { if (resumeSet.has(t)) scoreNumerator += 3; });
+
+                    // Requirements
+                    scoreDenom += reqTokens.length * 2 || 1;
+                    reqTokens.forEach(t => { if (resumeSet.has(t)) scoreNumerator += 2; });
+
+                    // Description
+                    scoreDenom += descTokens.length * 1 || 1;
+                    descTokens.forEach(t => { if (resumeSet.has(t)) scoreNumerator += 1; });
+
+                        const raw = scoreDenom > 0 ? (scoreNumerator / scoreDenom) : 0;
+                        const pct = Math.round(Math.min(1, raw) * 100);
+                        return Math.max(0, Math.min(100, pct));
+                    } catch { return 0; }
+            };
+
+            // build deduped list and then apply local score to deduped items
+            const dedupedLong = Array.from(dedupMap.values());
+
+            // apply local score to any deduped job missing a backend matchScore
+            dedupedLong.forEach((jl) => {
+                if (!jl.matchScore || jl.matchScore === 0) {
+                    const local = computeLocalScore(resumeText, jl);
+                    jl.matchScore = local;
+                }
+            });
+
+            // Debug: log resumeText presence and computed matchScores
+            try {
+                console.log('ExploreJobs: resumeText present?', !!resumeText);
+                console.log('ExploreJobs: dedupedLong matchScores', dedupedLong.map(j => ({ id: j.id, title: j.title, matchScore: j.matchScore })));
+            } catch { /* ignore */ }
+
+            if (userId) {
+                const filtered = dedupedLong.filter((j) => {
+                    const apps = (j.applicants || []) as any[];
+                    try {
+                        return !apps.some((a: any) => a === userId || (a && (a.user_id === userId || a.applicant_id === userId)));
+                        } catch { return true; }
+                });
+                setLongTermJobs(filtered);
+            } else {
+                setLongTermJobs(dedupedLong);
+            }
         } finally {
             setIsFetchingJobs(false);
         }
-    };
+    }, [auth]);
 
     useEffect(() => {
         fetchJobs();
-    }, []);
+    }, [fetchJobs]);
 
     useEffect(() => {
         const timer = setInterval(() => {
@@ -139,7 +267,7 @@ const ExploreJobs: React.FC = () => {
             clearInterval(timer);
             window.removeEventListener('focus', onFocus);
         };
-    }, []);
+    }, [fetchJobs]);
 
     useEffect(() => {
         if (isExploring) {
@@ -165,6 +293,8 @@ const ExploreJobs: React.FC = () => {
             const data = await res.json();
             if (!res.ok) throw new Error(data.detail || 'Failed to apply');
             alert('Application submitted successfully');
+            // Refresh jobs so the applied job is removed from long-term matches
+            fetchJobs();
         } catch (err: any) {
             alert(err.message || 'Could not apply to this job');
         } finally {
@@ -238,7 +368,7 @@ const ExploreJobs: React.FC = () => {
                 </div>
 
                 {/* Right: Control Bar */}
-                <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-3">
                     {/* View Switcher - Cards/Map (only for daily wage) */}
                     {isDaily && isExploring && foundJobs.length > 0 && (
                         <div className="relative flex w-[92px] items-center rounded-xl border-2 border-neutral-200 bg-white p-1 shadow-sm">
@@ -261,7 +391,7 @@ const ExploreJobs: React.FC = () => {
                                 className={`relative z-10 flex h-9 w-1/2 items-center justify-center rounded-lg transition-colors ${viewMode === 'map' ? 'text-white' : 'text-neutral-700 hover:text-neutral-900'
                                     }`}
                             >
-                                <Map size={16} />
+                                <MapIcon size={16} />
                             </button>
                         </div>
                     )}
@@ -606,65 +736,94 @@ const ExploreJobs: React.FC = () => {
                         exit={{ opacity: 0 }}
                         className="relative z-10 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4"
                     >
-                        {longTermJobs.map((job, index) => (
-                            <motion.div
-                                key={job.id}
-                                initial={{ opacity: 0, y: 20 }}
-                                animate={{ opacity: 1, y: 0 }}
-                                transition={{ delay: index * 0.05 }}
-                                className="group relative cursor-pointer p-5 rounded-2xl border-2 border-neutral-200 bg-white shadow-sm hover:shadow-md hover:border-neutral-300 transition-all duration-300"
-                            >
-                                {/* Accent Line */}
-                                <div className="absolute left-0 top-4 bottom-4 w-0.5 rounded-full bg-neutral-600" />
+                        {longTermJobs.map((job, index) => {
+                            // matchScore is a percentage (0-100) from backend
+                            let matchLabel = 'Explore';
+                            if ((job.matchScore || 0) >= 75) matchLabel = 'Best Suits';
+                            else if ((job.matchScore || 0) >= 40) matchLabel = 'Good Suits';
+                            return (
+                                <motion.div
+                                    key={job.id}
+                                    initial={{ opacity: 0, y: 20 }}
+                                    animate={{ opacity: 1, y: 0 }}
+                                    transition={{ delay: index * 0.05 }}
+                                    className="group relative cursor-pointer p-5 rounded-2xl border-2 border-neutral-200 bg-white shadow-sm hover:shadow-md hover:border-neutral-300 transition-all duration-300"
+                                >
+                                    {/* Accent Line */}
+                                    <div className="absolute left-0 top-4 bottom-4 w-0.5 rounded-full bg-neutral-600" />
 
-                                {/* Header */}
-                                <div className="flex items-start justify-between mb-2">
-                                    <h3 className="text-lg font-semibold text-neutral-800 pr-3">{job.title}</h3>
-                                    <span className="shrink-0 text-xs px-2 py-0.5 rounded-md border border-neutral-300 text-neutral-600">
-                                        {job.type}
-                                    </span>
-                                </div>
-
-                                {/* Company */}
-                                <div className="flex items-center gap-2 mb-3">
-                                    <Briefcase size={14} className="text-neutral-500" />
-                                    <span className="text-sm font-medium text-neutral-700">{job.company}</span>
-                                </div>
-
-                                {/* Metrics */}
-                                <div className="space-y-2 mb-4">
-                                    <div className="flex items-center gap-2 text-sm text-neutral-600">
-                                        <MapPin size={14} className="text-neutral-500" />
-                                        <span>{job.location}</span>
-                                    </div>
-                                    <div className="flex items-center gap-2 text-sm text-neutral-700">
-                                        <IndianRupee size={14} className="text-neutral-500" />
-                                        <span className="font-medium">{job.salary}</span>
-                                    </div>
-                                </div>
-
-                                {/* Requirements */}
-                                <div className="flex flex-wrap gap-1 mb-3">
-                                    {job.requirements.map((req) => (
-                                        <span key={req} className="text-xs px-2 py-0.5 rounded-md bg-neutral-100 text-neutral-600">
-                                            {req}
+                                    {/* Header */}
+                                    <div className="flex items-start justify-between mb-2">
+                                        <h3 className="text-lg font-semibold text-neutral-800 pr-3">{job.title}</h3>
+                                        <span className="shrink-0 text-xs px-2 py-0.5 rounded-md border border-neutral-300 text-neutral-600">
+                                            {job.type}
                                         </span>
-                                    ))}
-                                </div>
+                                    </div>
 
-                                {/* Footer */}
-                                <div className="pt-3 border-t border-neutral-200/80 flex items-center justify-between">
-                                    <span className="text-xs text-neutral-500">{job.postedAt}</span>
-                                    <button
-                                        onClick={() => applyToJob(job.id, 'longterm')}
-                                        disabled={isApplying === job.id}
-                                        className="px-3 py-1.5 rounded-lg bg-neutral-900 text-white text-xs font-medium hover:bg-neutral-800 transition-colors disabled:opacity-60"
-                                    >
-                                        Apply Now
-                                    </button>
-                                </div>
-                            </motion.div>
-                        ))}
+                                    {/* Company */}
+                                    <div className="flex items-center gap-2 mb-3">
+                                        <Briefcase size={14} className="text-neutral-500" />
+                                        <span className="text-sm font-medium text-neutral-700">{job.company}</span>
+                                    </div>
+
+                                    {/* Metrics */}
+                                    <div className="space-y-2 mb-4">
+                                        <div className="flex items-center gap-2 text-sm text-neutral-600">
+                                            <MapPin size={14} className="text-neutral-500" />
+                                            <span>{job.location}</span>
+                                        </div>
+                                        <div className="flex items-center gap-2 text-sm text-neutral-700">
+                                            <IndianRupee size={14} className="text-neutral-500" />
+                                            <span className="font-medium">{job.salary}</span>
+                                        </div>
+                                    </div>
+
+                                    {/* Requirements */}
+                                    <div className="flex flex-wrap gap-1 mb-3">
+                                                            {job.requirements.map((req, ri) => (
+                                                                <span key={`${req}-${ri}`} className="text-xs px-2 py-0.5 rounded-md bg-neutral-100 text-neutral-600">
+                                                                    {req}
+                                                                </span>
+                                                            ))}
+                                                        </div>
+
+                                    {/* Footer */}
+                                    <div className="pt-3 border-t border-neutral-200/80 flex items-center justify-between">
+                                        <div className="flex items-center gap-3">
+                                            <span className="text-xs text-neutral-500">{job.postedAt}</span>
+                                            <span className={`text-xs font-semibold ${job.matchScore && job.matchScore >= 75 ? 'text-amber-600' : job.matchScore && job.matchScore >= 40 ? 'text-emerald-600' : 'text-neutral-500'}`}>{matchLabel}</span>
+                                        </div>
+
+                                        <div>
+                                            <button
+                                                onClick={() => setSelectedJob({
+                                                    id: job.id,
+                                                    title: job.title,
+                                                    employer: job.company || 'Company',
+                                                    employerAvatar: `https://i.pravatar.cc/150?img=${(index % 60) + 1}`,
+                                                    employerRating: 4.2,
+                                                    coordinates: [job.coordinates?.[0] ?? 12.9716, job.coordinates?.[1] ?? 77.5946],
+                                                    address: job.location || 'Remote',
+                                                    location: job.location || 'Remote',
+                                                    distance: calculateDistance([job.coordinates?.[0] ?? 12.9716, job.coordinates?.[1] ?? 77.5946]),
+                                                    pay: job.salary || '₹0',
+                                                    salaryAmount: 0,
+                                                    time: job.type || 'Full-time',
+                                                    description: job.description || '',
+                                                    skills: Array.isArray(job.requirements) ? job.requirements : [],
+                                                    postedAt: job.postedAt,
+                                                    job_type: 'long_term',
+                                                    employer_contact: job.employer_contact || '+919876543210'
+                                                })}
+                                                className="px-3 py-1.5 rounded-lg bg-neutral-900 text-white text-xs font-medium hover:bg-neutral-800 ml-2"
+                                            >
+                                                View Details
+                                            </button>
+                                        </div>
+                                    </div>
+                                </motion.div>
+                            );
+                        })}
                     </motion.div>
                 )}
             </AnimatePresence>
@@ -673,7 +832,6 @@ const ExploreJobs: React.FC = () => {
             <AnimatePresence>
                 {selectedJob && (
                     <>
-                        {/* Backdrop */}
                         <motion.div
                             initial={{ opacity: 0 }}
                             animate={{ opacity: 1 }}
@@ -682,7 +840,6 @@ const ExploreJobs: React.FC = () => {
                             onClick={() => setSelectedJob(null)}
                         />
 
-                        {/* Modal */}
                         <motion.div
                             initial={{ opacity: 0, scale: 0.9, y: 20 }}
                             animate={{ opacity: 1, scale: 1, y: 0 }}
@@ -690,15 +847,10 @@ const ExploreJobs: React.FC = () => {
                             className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[90vw] max-w-2xl max-h-[90vh] z-[101] overflow-auto"
                         >
                             <div className="rounded-2xl bg-white border-2 border-neutral-200 shadow-2xl overflow-hidden">
-                                {/* Close Button */}
-                                <button
-                                    onClick={() => setSelectedJob(null)}
-                                    className="absolute top-4 right-4 z-10 p-2 rounded-lg bg-white border-2 border-neutral-300 hover:bg-neutral-100 transition-colors shadow-lg"
-                                >
+                                <button onClick={() => setSelectedJob(null)} className="absolute top-4 right-4 z-10 p-2 rounded-lg bg-white border-2 border-neutral-300 hover:bg-neutral-100 transition-colors shadow-lg">
                                     <X size={20} className="text-neutral-700" />
                                 </button>
 
-                                {/* Header */}
                                 <div className="px-6 py-6 bg-neutral-50 border-b border-neutral-200">
                                     <h3 className="text-2xl font-bold text-neutral-800 mb-2">{selectedJob.title}</h3>
                                     <div className="flex items-center gap-4">
@@ -710,15 +862,11 @@ const ExploreJobs: React.FC = () => {
                                                 <span className="text-sm text-neutral-600">{selectedJob.employerRating}</span>
                                             </div>
                                         </div>
-                                        <span className="px-2 py-1 rounded-md bg-emerald-100 text-emerald-700 text-xs font-medium">
-                                            {calculateDistance(selectedJob.coordinates)}
-                                        </span>
+                                        <span className="px-2 py-1 rounded-md bg-emerald-100 text-emerald-700 text-xs font-medium">{calculateDistance(selectedJob.coordinates)}</span>
                                     </div>
                                 </div>
 
-                                {/* Body */}
                                 <div className="p-6 space-y-6">
-                                    {/* Pay & Time */}
                                     <div className="grid grid-cols-2 gap-4">
                                         <div className="p-4 rounded-lg bg-neutral-50 border border-neutral-200">
                                             <p className="text-xs text-neutral-500 uppercase tracking-wider mb-1">Pay</p>
@@ -730,7 +878,6 @@ const ExploreJobs: React.FC = () => {
                                         </div>
                                     </div>
 
-                                    {/* Location */}
                                     <div>
                                         <h4 className="text-sm font-semibold text-neutral-700 mb-2 uppercase tracking-wider">Location</h4>
                                         <div className="flex items-start gap-2 text-neutral-600">
@@ -739,58 +886,49 @@ const ExploreJobs: React.FC = () => {
                                         </div>
                                     </div>
 
-                                    {/* Description */}
                                     <div>
                                         <h4 className="text-sm font-semibold text-neutral-700 mb-2 uppercase tracking-wider">Description</h4>
                                         <p className="text-neutral-600">{selectedJob.description}</p>
                                     </div>
 
-                                    {/* Skills Required */}
                                     <div>
                                         <h4 className="text-sm font-semibold text-neutral-700 mb-2 uppercase tracking-wider">Skills Required</h4>
                                         <div className="flex flex-wrap gap-2">
-                                            {selectedJob.skills.map((skill) => (
-                                                <span key={skill} className="px-3 py-1.5 rounded-lg bg-neutral-100 text-neutral-700 text-sm font-medium border border-neutral-200">
-                                                    {skill}
-                                                </span>
+                                            {(selectedJob.skills || []).map((skill: string) => (
+                                                <span key={skill} className="px-3 py-1.5 rounded-lg bg-neutral-100 text-neutral-700 text-sm font-medium border border-neutral-200">{skill}</span>
                                             ))}
                                         </div>
                                     </div>
 
-                                    {/* Map Preview - Expandable Card */}
                                     <div>
                                         <h4 className="text-sm font-semibold text-neutral-700 mb-2 uppercase tracking-wider">Job Location</h4>
                                         <LocationMap
                                             location={selectedJob.address}
-                                            coordinates={`${selectedJob.coordinates[0].toFixed(4)}° N, ${selectedJob.coordinates[1].toFixed(4)}° E`}
+                                            coordinates={`${selectedJob.coordinates?.[0]?.toFixed?.(4) ?? 0}° N, ${selectedJob.coordinates?.[1]?.toFixed?.(4) ?? 0}° E`}
                                             isDark={false}
                                         />
                                     </div>
 
-                                    {/* Actions */}
-                                    <div className="flex flex-col gap-3 pt-4">
-                                        <div className="flex gap-3">
-                                            <a
-                                                href={`tel:+919876543210`}
-                                                className="flex-1 py-3 rounded-lg bg-neutral-200 text-neutral-700 font-semibold text-sm hover:bg-neutral-300 transition-colors flex items-center justify-center gap-2"
-                                            >
-                                                <Phone size={16} />
-                                                Call Employer
-                                            </a>
-                                            <button
-                                                className="flex-1 py-3 rounded-lg border-2 border-amber-500 text-amber-600 font-semibold text-sm hover:bg-amber-50 transition-colors"
-                                            >
-                                                💬 Negotiate Price
+                                    {/* Actions: daily wages keep original buttons; long-term only Apply */}
+                                    {isDaily ? (
+                                        <>
+                                            <div className="flex gap-3">
+                                                <a href={`tel:${selectedJob.employer_contact || '+919876543210'}`} className="flex-1 py-3 rounded-lg bg-neutral-200 text-neutral-700 font-semibold text-sm hover:bg-neutral-300 transition-colors flex items-center justify-center gap-2">
+                                                    <Phone size={16} /> Call Employer
+                                                </a>
+                                                <button className="flex-1 py-3 rounded-lg border-2 border-amber-500 text-amber-600 font-semibold text-sm hover:bg-amber-50 transition-colors">
+                                                    💬 Negotiate Price
+                                                </button>
+                                            </div>
+                                            <button onClick={() => applyToJob(selectedJob.id, 'daily', selectedJob.salaryAmount)} disabled={isApplying === selectedJob.id} className="w-full py-3 rounded-lg bg-emerald-600 text-white font-semibold text-sm hover:bg-emerald-700 transition-colors">
+                                                {isApplying === selectedJob.id ? 'Applying...' : 'Accept Job'}
                                             </button>
+                                        </>
+                                    ) : (
+                                        <div className="flex items-center gap-3 pt-4">
+                                            <button onClick={() => navigate(`/apply/${selectedJob.id}`)} className="flex-1 py-3 rounded-lg bg-neutral-900 text-white font-semibold text-sm hover:bg-neutral-800 transition-colors">Apply Now</button>
                                         </div>
-                                        <button
-                                            onClick={() => applyToJob(selectedJob.id, 'daily', selectedJob.salaryAmount)}
-                                            disabled={isApplying === selectedJob.id}
-                                            className="w-full py-3 rounded-lg bg-emerald-600 text-white font-semibold text-sm hover:bg-emerald-700 transition-colors"
-                                        >
-                                            {isApplying === selectedJob.id ? 'Applying...' : 'Accept Job'}
-                                        </button>
-                                    </div>
+                                    )}
                                 </div>
                             </div>
                         </motion.div>

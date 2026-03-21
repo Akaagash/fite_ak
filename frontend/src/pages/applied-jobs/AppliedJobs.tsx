@@ -146,6 +146,17 @@ const AppliedJobs: React.FC = () => {
                 // Refresh applications
                 await fetchApplications();
                 setShowCancelModal(false);
+                // If this was a long-term application, navigate back to explore so
+                // the job will be visible again (backend removes applicant id)
+                try {
+                    if (selectedApplication && selectedApplication.job_snapshot?.type === 'longterm') {
+                        // navigate to explore jobs page
+                        // lazy-import navigate from react-router
+                        window.location.href = '/explore-jobs';
+                    }
+                } catch (e) {
+                    // ignore navigation errors
+                }
             } else {
                 alert(data.detail || 'Failed to cancel application');
             }
@@ -381,8 +392,11 @@ const AppliedJobs: React.FC = () => {
 
                                     {/* Header */}
                                     <div className="flex items-start justify-between mb-3">
-                                        <h3 className="text-lg font-semibold text-neutral-800 pr-3">{app.job_snapshot.title}</h3>
-                                        {getStatusBadge(app.status)}
+                                        <div className="flex items-center gap-3">
+                                            <h3 className="text-lg font-semibold text-neutral-800 pr-3">{app.job_snapshot.title}</h3>
+                                            <span className="text-xs px-2 py-0.5 rounded-md bg-neutral-100 text-neutral-700 font-medium">{app.job_snapshot.type === 'longterm' ? 'Long Term' : 'Daily'}</span>
+                                            {getStatusBadge(app.status)}
+                                        </div>
                                     </div>
 
                                     {/* Metrics */}
@@ -438,6 +452,7 @@ const AppliedJobs: React.FC = () => {
                                     <div className="flex-1 min-w-0">
                                         <div className="flex items-center gap-3 mb-1">
                                             <h3 className="text-base font-semibold text-neutral-800">{app.job_snapshot.title}</h3>
+                                            <span className="text-xs px-2 py-0.5 rounded-md bg-neutral-100 text-neutral-700 font-medium">{app.job_snapshot.type === 'longterm' ? 'Long Term' : 'Daily'}</span>
                                             {getStatusBadge(app.status)}
                                         </div>
                                         <div className="flex items-center gap-4 text-sm text-neutral-600">
