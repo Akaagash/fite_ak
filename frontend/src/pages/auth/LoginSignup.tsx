@@ -3,6 +3,8 @@ import { Eye, EyeOff, Briefcase, HardHat } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 
+const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8010';
+
 const LoginSignup: React.FC = () => {
     const [isLogin, setIsLogin] = useState(true);
     const [showPassword, setShowPassword] = useState(false);
@@ -38,7 +40,7 @@ const LoginSignup: React.FC = () => {
 
         try {
             const endpoint = isLogin ? '/api/auth/login' : '/api/auth/signup';
-            const response = await fetch(`http://localhost:8000${endpoint}`, {
+            const response = await fetch(`${API_BASE}${endpoint}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 credentials: 'include', // Important: Send cookies with request

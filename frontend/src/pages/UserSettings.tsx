@@ -1,10 +1,12 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { User, Lock, Briefcase, Bell, LogOut, Edit, CheckCircle, CloudUpload, FileText, MapPin } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { useMode } from '../context/ModeContext';
 import { useAuth } from '../context/AuthContext';
 
 const UserSettings: React.FC = () => {
+    const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8010';
+    const FALLBACK_API_BASE = 'http://localhost:8000';
     const [radius, setRadius] = useState(25);
     const [availability, setAvailability] = useState(true);
     const [notifications, setNotifications] = useState(true);
@@ -14,8 +16,43 @@ const UserSettings: React.FC = () => {
     const [resumeUrl, setResumeUrl] = useState<string | null>(user?.resume_url || null);
     const [uploading, setUploading] = useState(false);
     const [uploadError, setUploadError] = useState<string | null>(null);
+    const [profilePhoto, setProfilePhoto] = useState<string | null>(user?.profile_photo || null);
+    const [uploadingPhoto, setUploadingPhoto] = useState(false);
+    const [photoError, setPhotoError] = useState<string | null>(null);
+    const [saveError, setSaveError] = useState<string | null>(null);
+    const [saveSuccess, setSaveSuccess] = useState<string | null>(null);
+    const [savingProfile, setSavingProfile] = useState(false);
+    const [firstName, setFirstName] = useState('');
+    const [lastName, setLastName] = useState('');
+    const [phone, setPhone] = useState('');
+    const fileInputRef = useRef<HTMLInputElement>(null);
 
     const isDaily = mode === 'daily';
+
+    // Update profilePhoto when user data changes
+    React.useEffect(() => {
+        if (user?.profile_photo) {
+            setProfilePhoto(user.profile_photo);
+        }
+    }, [user?.profile_photo]);
+
+    React.useEffect(() => {
+        if (!user) return;
+        const parts = (user.full_name || '').trim().split(/\s+/).filter(Boolean);
+        setFirstName(parts[0] || '');
+        setLastName(parts.slice(1).join(' '));
+        setPhone(user.phone || '');
+    }, [user]);
+
+    const placeholderAvatar = React.useMemo(() => {
+        const seed = (user?.user_id || user?.email || 'default').length % 70;
+        return `https://i.pravatar.cc/150?img=${seed || 1}`;
+    }, [user?.user_id, user?.email]);
+
+    const uploadTargets = React.useMemo(() => {
+        const bases = [API_BASE, FALLBACK_API_BASE].filter(Boolean);
+        return Array.from(new Set(bases));
+    }, [API_BASE]);
 
     const navItems = [
         { id: 'profile', label: 'General Profile', icon: User },
@@ -23,6 +60,161 @@ const UserSettings: React.FC = () => {
         { id: 'preferences', label: 'Job Preferences', icon: Briefcase },
         { id: 'notifications', label: 'Notifications', icon: Bell },
     ];
+
+    const handleProfilePhotoClick = () => {
+        fileInputRef.current?.click();
+    };
+
+    const handleProfilePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+
+        const validTypes = ['image/jpeg', 'image/png', 'image/webp'];
+        if (!validTypes.includes(file.type)) {
+            setPhotoError('Only JPG, PNG, and WebP images are allowed.');
+            return;
+        }
+
+        if (file.size > 5 * 1024 * 1024) {
+            setPhotoError('Image size must be less than 5MB.');
+            return;
+        }
+
+        setUploadingPhoto(true);
+        setPhotoError(null);
+        setSaveSuccess(null);
+
+        try {
+            const formData = new FormData();
+            formData.append('file', file);
+            const token = localStorage.getItem('token');
+
+            let lastError = 'Upload failed';
+            let uploadedPhotoUrl: string | null = null;
+
+            for (const baseUrl of uploadTargets) {
+                const res = await fetch(`${baseUrl}/api/auth/upload-profile-photo`, {
+                    method: 'POST',
+                    body: formData,
+                    credentials: 'include',
+                    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+                });
+
+                if (res.ok) {
+                    const data = await res.json();
+                    uploadedPhotoUrl = data.profile_photo || data.photo_url || null;
+                    break;
+                }
+
+                try {
+                    const data = await res.json();
+                    lastError = data.detail || data.message || `Upload failed with status ${res.status}`;
+                } catch (_e) {
+                    lastError = `Upload failed with status ${res.status}`;
+                }
+            }
+
+            // Fallback path: if upload endpoint is unavailable, store image data URL via profile update endpoint.
+            if (!uploadedPhotoUrl && /404|not found/i.test(lastError)) {
+                const dataUrl = await new Promise<string>((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.onload = () => resolve(String(reader.result || ''));
+                    reader.onerror = () => reject(new Error('Failed to read image file'));
+                    reader.readAsDataURL(file);
+                });
+
+                for (const baseUrl of uploadTargets) {
+                    const profileRes = await fetch(`${baseUrl}/api/auth/profile`, {
+                        method: 'PUT',
+                        credentials: 'include',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+                        },
+                        body: JSON.stringify({ profile_photo: dataUrl }),
+                    });
+
+                    if (profileRes.ok) {
+                        const payload = await profileRes.json();
+                        uploadedPhotoUrl = payload?.user?.profile_photo || dataUrl;
+                        break;
+                    }
+                }
+            }
+
+            if (!uploadedPhotoUrl) {
+                throw new Error(lastError || 'Profile photo upload failed');
+            }
+
+            setProfilePhoto(uploadedPhotoUrl);
+            
+            // Refresh auth context so other pages see the updated profile photo
+            try {
+                await checkAuth();
+            } catch (_e) {
+                // ignore
+            }
+            setSaveSuccess('Profile photo updated successfully.');
+        } catch (err: any) {
+            console.error('Profile photo upload error:', err);
+            setPhotoError(err.message || 'Upload failed');
+        } finally {
+            setUploadingPhoto(false);
+            if (fileInputRef.current) {
+                fileInputRef.current.value = '';
+            }
+        }
+    };
+
+    const handleSaveProfile = async () => {
+        setSaveError(null);
+        setSaveSuccess(null);
+        setSavingProfile(true);
+        try {
+            const token = localStorage.getItem('token');
+            const fullName = `${firstName} ${lastName}`.trim();
+            let lastError = 'Failed to save profile changes';
+            let success = false;
+
+            for (const baseUrl of uploadTargets) {
+                const res = await fetch(`${baseUrl}/api/auth/profile`, {
+                    method: 'PUT',
+                    credentials: 'include',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+                    },
+                    body: JSON.stringify({
+                        full_name: fullName || undefined,
+                        phone: phone || undefined,
+                    }),
+                });
+
+                if (res.ok) {
+                    success = true;
+                    break;
+                }
+
+                try {
+                    const data = await res.json();
+                    lastError = data.detail || data.message || lastError;
+                } catch (_e) {
+                    lastError = `Failed to save profile changes (${res.status})`;
+                }
+            }
+
+            if (!success) {
+                throw new Error(lastError);
+            }
+
+            await checkAuth();
+            setSaveSuccess('Profile changes saved successfully.');
+        } catch (err: any) {
+            setSaveError(err.message || 'Failed to save profile changes');
+        } finally {
+            setSavingProfile(false);
+        }
+    };
 
     const handleResumeUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
@@ -37,7 +229,7 @@ const UserSettings: React.FC = () => {
             const formData = new FormData();
             formData.append('file', file);
             const token = localStorage.getItem('token');
-            const res = await fetch('http://localhost:8000/api/auth/upload-resume', {
+            const res = await fetch(`${API_BASE}/api/auth/upload-resume`, {
                 method: 'POST',
                 body: formData,
                 credentials: 'include',
@@ -116,26 +308,58 @@ const UserSettings: React.FC = () => {
                                 className="rounded-2xl border-2 border-neutral-200 p-6 bg-white shadow-sm"
                             >
                                 <div className="flex flex-col sm:flex-row gap-6 items-start sm:items-center">
-                                    <div className="relative group cursor-pointer">
+                                    <div className="relative group cursor-pointer" onClick={handleProfilePhotoClick}>
                                         <div
-                                            className="rounded-full h-20 w-20 border-4 border-white shadow-lg bg-cover bg-center"
-                                            style={{ backgroundImage: 'url("https://i.pravatar.cc/150?img=3")' }}
+                                            className="rounded-full h-20 w-20 border-4 border-white shadow-lg bg-cover bg-center transition-opacity group-hover:opacity-80"
+                                            style={{ 
+                                                backgroundImage: profilePhoto 
+                                                    ? `url("${profilePhoto}")`
+                                                    : `url("${placeholderAvatar}")`
+                                            }}
                                         />
-                                        <div className={`absolute bottom-0 right-0 ${isDaily ? 'bg-emerald-500' : 'bg-amber-500'} p-1.5 rounded-full shadow-md border-2 border-white flex items-center justify-center`}>
-                                            <Edit size={12} className="text-white" />
+                                        <input
+                                            ref={fileInputRef}
+                                            type="file"
+                                            accept="image/jpeg,image/png,image/webp"
+                                            className="hidden"
+                                            onChange={handleProfilePhotoUpload}
+                                            disabled={uploadingPhoto}
+                                        />
+                                        <div className={`absolute bottom-0 right-0 ${isDaily ? 'bg-emerald-500' : 'bg-amber-500'} p-1.5 rounded-full shadow-md border-2 border-white flex items-center justify-center group-hover:scale-110 transition-transform`}>
+                                            {uploadingPhoto ? (
+                                                <div className="animate-spin">
+                                                    <div className="h-3 w-3 border-2 border-white border-t-transparent rounded-full" />
+                                                </div>
+                                            ) : (
+                                                <Edit size={12} className="text-white" />
+                                            )}
                                         </div>
                                     </div>
                                     <div className="flex flex-col flex-1">
-                                        <h2 className="text-xl font-bold text-neutral-900">Athish</h2>
+                                        <h2 className="text-xl font-bold text-neutral-900">{user?.full_name || 'User'}</h2>
                                         <div className="flex flex-wrap gap-2 items-center mt-1">
-                                            <span className={`${isDaily ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'} text-xs font-semibold px-2.5 py-1 rounded-full`}>Full Stack Developer</span>
+                                            {user?.experience && (
+                                                <span className={`${isDaily ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'} text-xs font-semibold px-2.5 py-1 rounded-full`}>{user.experience}</span>
+                                            )}
                                             <span className="text-neutral-500 text-sm font-medium">Member since 2024</span>
                                         </div>
                                     </div>
-                                    <button className="px-4 py-2.5 rounded-xl border-2 border-neutral-200 text-sm font-semibold text-neutral-700 hover:bg-neutral-50 transition-colors">
-                                        View Public Profile
-                                    </button>
                                 </div>
+                                {photoError && (
+                                    <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-xl">
+                                        <p className="text-red-600 text-sm font-medium">{photoError}</p>
+                                    </div>
+                                )}
+                                {saveSuccess && (
+                                    <div className="mt-4 p-3 bg-emerald-50 border border-emerald-200 rounded-xl">
+                                        <p className="text-emerald-700 text-sm font-medium">{saveSuccess}</p>
+                                    </div>
+                                )}
+                                {saveError && (
+                                    <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-xl">
+                                        <p className="text-red-600 text-sm font-medium">{saveError}</p>
+                                    </div>
+                                )}
                             </motion.div>
 
                             {/* Personal Information */}
@@ -149,15 +373,15 @@ const UserSettings: React.FC = () => {
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
                                     <label className="flex flex-col gap-2">
                                         <span className="text-neutral-700 text-sm font-semibold">First Name</span>
-                                        <input className="w-full rounded-xl border-2 border-neutral-200 bg-neutral-50 text-neutral-900 h-12 px-4 focus:ring-0 focus:border-neutral-900 outline-none transition-all text-sm font-medium" type="text" defaultValue="Athish" />
+                                        <input className="w-full rounded-xl border-2 border-neutral-200 bg-neutral-50 text-neutral-900 h-12 px-4 focus:ring-0 focus:border-neutral-900 outline-none transition-all text-sm font-medium" type="text" value={firstName} onChange={(e) => setFirstName(e.target.value)} />
                                     </label>
                                     <label className="flex flex-col gap-2">
                                         <span className="text-neutral-700 text-sm font-semibold">Last Name</span>
-                                        <input className="w-full rounded-xl border-2 border-neutral-200 bg-neutral-50 text-neutral-900 h-12 px-4 focus:ring-0 focus:border-neutral-900 outline-none transition-all text-sm font-medium" type="text" defaultValue="Kumar" />
+                                        <input className="w-full rounded-xl border-2 border-neutral-200 bg-neutral-50 text-neutral-900 h-12 px-4 focus:ring-0 focus:border-neutral-900 outline-none transition-all text-sm font-medium" type="text" value={lastName} onChange={(e) => setLastName(e.target.value)} />
                                     </label>
                                     <label className="flex flex-col gap-2">
                                         <span className="text-neutral-700 text-sm font-semibold">Email Address</span>
-                                        <input className="w-full rounded-xl border-2 border-neutral-200 bg-neutral-50 text-neutral-900 h-12 px-4 focus:ring-0 focus:border-neutral-900 outline-none transition-all text-sm font-medium" type="email" defaultValue="athish@example.com" />
+                                        <input className="w-full rounded-xl border-2 border-neutral-200 bg-neutral-50 text-neutral-900 h-12 px-4 focus:ring-0 focus:border-neutral-900 outline-none transition-all text-sm font-medium" type="email" value={user?.email || ''} readOnly />
                                     </label>
                                     <label className="flex flex-col gap-2">
                                         <div className="flex justify-between">
@@ -166,12 +390,14 @@ const UserSettings: React.FC = () => {
                                                 <CheckCircle size={12} /> Verified
                                             </span>
                                         </div>
-                                        <input className="w-full rounded-xl border-2 border-neutral-200 bg-neutral-50 text-neutral-900 h-12 px-4 focus:ring-0 focus:border-neutral-900 outline-none transition-all text-sm font-medium" type="tel" defaultValue="+91 98765 43210" />
+                                        <input className="w-full rounded-xl border-2 border-neutral-200 bg-neutral-50 text-neutral-900 h-12 px-4 focus:ring-0 focus:border-neutral-900 outline-none transition-all text-sm font-medium" type="tel" defaultValue={user?.phone || ''} />
+                                        <input className="w-full rounded-xl border-2 border-neutral-200 bg-neutral-50 text-neutral-900 h-12 px-4 focus:ring-0 focus:border-neutral-900 outline-none transition-all text-sm font-medium" type="tel" value={phone} onChange={(e) => setPhone(e.target.value)} />
                                     </label>
                                 </div>
                             </motion.div>
 
-                            {/* Professional Documents */}
+                            {/* Professional Documents - Only show for non-daily-wage users */}
+                            {!isDaily && (
                             <motion.div
                                 initial={{ opacity: 0, y: 20 }}
                                 animate={{ opacity: 1, y: 0 }}
@@ -200,13 +426,15 @@ const UserSettings: React.FC = () => {
                                             </div>
                                             <div>
                                                 {/* Resolve relative resume urls to backend origin if needed */}
-                                                <a href={resumeUrl.startsWith('/') ? `http://localhost:8000${resumeUrl}` : resumeUrl} target="_blank" rel="noopener noreferrer" className="text-sm font-bold text-neutral-900 underline">View Resume</a>
+                                                <a href={resumeUrl.startsWith('/') ? `${API_BASE}${resumeUrl}` : resumeUrl} target="_blank" rel="noopener noreferrer" className="text-sm font-bold text-neutral-900 underline">View Resume</a>
                                                 <p className="text-xs text-neutral-500 font-medium">PDF • Uploaded</p>
                                             </div>
                                         </div>
                                     </div>
                                 )}
                             </motion.div>
+                            )}
+
 
                             {/* App Preferences */}
                             <motion.div
@@ -227,7 +455,10 @@ const UserSettings: React.FC = () => {
                                             <span className={`${isDaily ? 'text-emerald-600' : 'text-amber-600'} font-bold text-sm`}>{radius} km</span>
                                         </div>
                                         <input
-                                            className={`w-full h-2.5 bg-neutral-200 rounded-full appearance-none cursor-pointer ${isDaily ? 'accent-emerald-600' : 'accent-amber-600'}`}
+                                            className="w-full h-3 bg-neutral-200 rounded-full appearance-none cursor-pointer accent-transparent [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-5 [&::-webkit-slider-thumb]:h-5 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-neutral-900 [&::-webkit-slider-thumb]:cursor-pointer [&::-webkit-slider-thumb]:shadow-md [&::-moz-range-thumb]:w-5 [&::-moz-range-thumb]:h-5 [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:bg-neutral-900 [&::-moz-range-thumb]:cursor-pointer [&::-moz-range-thumb]:border-0 [&::-moz-range-thumb]:shadow-md"
+                                            style={{
+                                                background: `linear-gradient(to right, ${isDaily ? '#10b981' : '#d97706'} 0%, ${isDaily ? '#10b981' : '#d97706'} ${((radius - 5) / 95) * 100}%, #e5e7eb ${((radius - 5) / 95) * 100}%, #e5e7eb 100%)`
+                                            }}
                                             max="100"
                                             min="5"
                                             type="range"
@@ -283,8 +514,12 @@ const UserSettings: React.FC = () => {
                                 <button className="px-6 py-3 rounded-xl border-2 border-neutral-200 text-neutral-700 font-semibold text-sm hover:bg-neutral-50 transition-colors">
                                     Cancel
                                 </button>
-                                <button className="px-8 py-3 rounded-xl bg-neutral-900 hover:bg-neutral-800 text-white font-semibold text-sm transition-all">
-                                    Save Changes
+                                <button
+                                    onClick={handleSaveProfile}
+                                    disabled={savingProfile}
+                                    className="px-8 py-3 rounded-xl bg-neutral-900 hover:bg-neutral-800 disabled:opacity-60 text-white font-semibold text-sm transition-all"
+                                >
+                                    {savingProfile ? 'Saving...' : 'Save Changes'}
                                 </button>
                             </div>
                         </div>

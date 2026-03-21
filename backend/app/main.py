@@ -36,6 +36,10 @@ async def lifespan(app: FastAPI):
 uploads_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads", "resumes")
 os.makedirs(uploads_dir, exist_ok=True)
 
+# Serve uploaded profile photos at /static/profile_photos/
+profile_photos_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads", "profile_photos")
+os.makedirs(profile_photos_dir, exist_ok=True)
+
 app = FastAPI(
     title="FITE API",
     description="Backend API for FITE - Job Marketplace Platform",
@@ -43,6 +47,7 @@ app = FastAPI(
     lifespan=lifespan
 )
 app.mount("/static/resumes", StaticFiles(directory=uploads_dir), name="resumes")
+app.mount("/static/profile_photos", StaticFiles(directory=profile_photos_dir), name="profile_photos")
 
 
 # Configure CORS middleware

@@ -34,6 +34,13 @@ def get_upload_dir():
     os.makedirs(upload_dir, exist_ok=True)
     return upload_dir
 
+def get_profile_photos_dir():
+    # Store profile photos in backend/app/uploads/profile_photos (ensure exists)
+    base = os.path.dirname(os.path.abspath(__file__))
+    upload_dir = os.path.join(base, "..", "uploads", "profile_photos")
+    os.makedirs(upload_dir, exist_ok=True)
+    return upload_dir
+
 async def get_current_user_id(access_token: str = Cookie(None, alias=settings.COOKIE_NAME), authorization: str = Header(None)):
     token = access_token
     if not token and authorization:
@@ -102,6 +109,61 @@ async def upload_resume(
         {"$set": update_payload}
     )
     return {"resume_url": resume_url, "resume_text": resume_text, "resume_embedding": (resume_embedding is not None), "message": "Resume uploaded and text extracted successfully."}
+
+
+@router.post("/upload-profile-photo", status_code=200)
+async def upload_profile_photo(
+    file: UploadFile = File(...),
+    user_id: str = Depends(get_current_user_id)
+):
+    """
+    Upload a profile photo for the user.
+    Accepts JPG, PNG, and WebP images.
+    """
+    # Only allow image files
+    allowed_types = {"image/jpeg", "image/png", "image/webp"}
+    if file.content_type not in allowed_types:
+        raise HTTPException(
+            status_code=400, 
+            detail="Only JPG, PNG, and WebP images are allowed."
+        )
+    
+    # Save file with unique name
+    ext_map = {
+        "image/jpeg": ".jpg",
+        "image/png": ".png",
+        "image/webp": ".webp"
+    }
+    ext = ext_map.get(file.content_type, ".jpg")
+    filename = f"{user_id}_{uuid4().hex}{ext}"
+    upload_dir = get_profile_photos_dir()
+    file_path = os.path.join(upload_dir, filename)
+    content = await file.read()
+    
+    # Check file size (max 5MB)
+    if len(content) > 5 * 1024 * 1024:
+        raise HTTPException(
+            status_code=400,
+            detail="File size must be less than 5MB."
+        )
+    
+    with open(file_path, "wb") as f:
+        f.write(content)
+    
+    # Build absolute URL for the uploaded photo
+    profile_photo_url = f"{settings.BACKEND_URL.rstrip('/')}/static/profile_photos/{filename}"
+    
+    # Update user profile with profile_photo
+    users_collection = Database.get_collection("users")
+    await users_collection.update_one(
+        {"_id": ObjectId(user_id)},
+        {"$set": {"profile_photo": profile_photo_url, "updated_at": datetime.utcnow()}}
+    )
+    
+    return {
+        "profile_photo": profile_photo_url,
+        "message": "Profile photo uploaded successfully."
+    }
 
 
 class UpdateProfileRequest(BaseModel):

@@ -6,6 +6,7 @@ interface User {
     role: string;
     full_name?: string;
     resume_url?: string;
+    profile_photo?: string;
     phone?: string;
     address?: string;
     city?: string;
@@ -24,6 +25,7 @@ interface AuthContextType {
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
+const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8010';
 
 export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
     const [user, setUser] = useState<User | null>(null);
@@ -35,7 +37,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     const checkAuth = async () => {
         try {
             const token = localStorage.getItem('token');
-            const response = await fetch('http://localhost:8000/api/auth/me', {
+            const response = await fetch(`${API_BASE}/api/auth/me`, {
                 method: 'GET',
                 credentials: 'include', // Send cookies with request
                 headers: token ? { Authorization: `Bearer ${token}` } : undefined,
@@ -67,7 +69,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
      */
     const logout = async () => {
         try {
-            await fetch('http://localhost:8000/api/auth/logout', {
+            await fetch(`${API_BASE}/api/auth/logout`, {
                 method: 'POST',
                 credentials: 'include',
             });

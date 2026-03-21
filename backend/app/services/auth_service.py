@@ -124,7 +124,7 @@ class AuthService:
         user = await users_collection.find_one({"email": email})
         if not user:
             return None
-        
+
         # Return user response (without password)
         return UserResponse(
             email=user["email"],
@@ -194,6 +194,7 @@ class AuthService:
             "created_at": user_doc.get("created_at"),
             "updated_at": user_doc.get("updated_at"),
             "full_name": full_name,
+            "profile_photo": user_doc.get("profile_photo"),
             "phone": user_doc.get("phone"),
             "address": user_doc.get("address"),
             "city": user_doc.get("city"),

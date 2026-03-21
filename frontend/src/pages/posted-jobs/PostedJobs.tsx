@@ -4,6 +4,8 @@ import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { LayoutGrid, List, Plus, MapPin, Clock, IndianRupee, Users, X, ChevronRight, ChevronDown, Search } from 'lucide-react';
 import TextType from '../../components/ui/TextType';
+const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8010';
+
 
 // Slide-Over Drawer Component
 interface PostJobDrawerProps {
@@ -203,6 +205,34 @@ const toDbStatus = (uiStatus: 'active' | 'ongoing' | 'completed'): 'open' | 'ong
     return 'completed';
 };
 
+const normalizeText = (value: string) =>
+    (value || '')
+        .toLowerCase()
+        .replace(/&/g, 'and')
+        .replace(/[^a-z0-9\s]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+const dailyCategoryAliases: Record<string, string[]> = {
+    plumbing: ['plumbing', 'plumber', 'pipe', 'piping'],
+    electrical: ['electrical', 'electrician', 'wiring', 'wireman'],
+    carpentry: ['carpentry', 'carpenter', 'woodwork', 'joinery'],
+    painting: ['painting', 'painter', 'paint'],
+    cleaning: ['cleaning', 'cleaner', 'housekeeping', 'janitor'],
+    gardening: ['gardening', 'gardener', 'landscaping'],
+    moving: ['moving', 'loader', 'loading', 'unloading', 'shifting', 'labor'],
+    'event help': ['event help', 'event', 'setup', 'stage', 'banner', 'crew'],
+    construction: ['construction', 'mason', 'masonry', 'civil', 'site work', 'builder'],
+    other: ['other'],
+};
+
+const longTermCategoryAliases: Record<string, string[]> = {
+    'full-time': ['full-time', 'full time', 'fulltime', 'permanent'],
+    'part-time': ['part-time', 'part time', 'parttime'],
+    contract: ['contract', 'contractual', 'freelance'],
+    internship: ['internship', 'intern'],
+};
+
 const statusBadgeClass = (status: string) => {
     if (status === 'ongoing') return 'bg-amber-100 text-amber-700';
     if (status === 'completed') return 'bg-neutral-200 text-neutral-700';
@@ -236,12 +266,26 @@ const PostedJobs: React.FC = () => {
             setIsLoading(true);
             setFetchError('');
             try {
-                const res = await fetch('http://localhost:8000/api/jobs/my-jobs', {
-                    credentials: 'include',
-                });
-                if (!res.ok) throw new Error('Failed to load jobs');
-                const data = await res.json();
-                setAllJobs(data.jobs || []);
+                // Load all posted jobs (same basis as Explore) across statuses.
+                const statuses = ['open', 'ongoing', 'completed'];
+                const statusResponses = await Promise.all(
+                    statuses.map((s) =>
+                        fetch(`${API_BASE}/api/jobs?status=${s}&skip=0&limit=200`, {
+                            credentials: 'include',
+                        })
+                    )
+                );
+
+                const statusPayloads = await Promise.all(
+                    statusResponses.map(async (r) => (r.ok ? await r.json() : { jobs: [] }))
+                );
+
+                const mergedJobs = statusPayloads.flatMap((p: any) => p.jobs || []);
+                const deduped = Array.from(
+                    new Map(mergedJobs.map((j: any) => [j._id, j])).values()
+                );
+
+                setAllJobs(deduped);
             } catch (err: any) {
                 setFetchError(err.message || 'Could not load jobs');
             } finally {
@@ -265,6 +309,11 @@ const PostedJobs: React.FC = () => {
         // Keep raw fields for filtering
         rawCategory: (job.category || '').toLowerCase(),
         rawWorkHours: (job.work_hours || '').toLowerCase(),
+        rawTitle: (job.title || '').toLowerCase(),
+        rawDescription: (job.description || '').toLowerCase(),
+        rawSkills: Array.isArray(job.skills_required)
+            ? job.skills_required.join(' ').toLowerCase()
+            : '',
     });
 
     // Status mapping: sidebar label -> DB value(s)
@@ -287,11 +336,25 @@ const PostedJobs: React.FC = () => {
             // Category
             if (categoryFilter !== 'all') {
                 if (isDaily) {
-                    // daily: match against category field
-                    if (!j.rawCategory.includes(categoryFilter)) return false;
+                    // daily: match category aliases against category/title/description/skills
+                    const normalizedFilter = normalizeText(categoryFilter);
+                    const aliases = dailyCategoryAliases[normalizedFilter] || [normalizedFilter];
+                    const haystack = normalizeText(
+                        `${j.rawCategory} ${j.rawTitle} ${j.rawDescription} ${j.rawSkills}`
+                    );
+
+                    const matched = aliases.some((alias) => haystack.includes(normalizeText(alias)));
+                    if (!matched) return false;
                 } else {
-                    // long-term: employment type is stored in work_hours
-                    if (!j.rawWorkHours.includes(categoryFilter)) return false;
+                    // long-term: match aliases against work_hours/category/title/description
+                    const normalizedFilter = normalizeText(categoryFilter);
+                    const aliases = longTermCategoryAliases[normalizedFilter] || [normalizedFilter];
+                    const haystack = normalizeText(
+                        `${j.rawWorkHours} ${j.rawCategory} ${j.rawTitle} ${j.rawDescription}`
+                    );
+
+                    const matched = aliases.some((alias) => haystack.includes(normalizeText(alias)));
+                    if (!matched) return false;
                 }
             }
             return true;
@@ -310,7 +373,7 @@ const PostedJobs: React.FC = () => {
         setStatusUpdateError('');
         setUpdatingJobId(jobId);
         try {
-            const res = await fetch(`http://localhost:8000/api/jobs/${jobId}`, {
+            const res = await fetch(`${API_BASE}/api/jobs/${jobId}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 credentials: 'include',

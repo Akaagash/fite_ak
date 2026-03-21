@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     # CORS Configuration
     FRONTEND_URL: str = "http://localhost:5173"  # Frontend URL for CORS
     # Backend public URL (used to build absolute links for uploaded files)
-    BACKEND_URL: str = "http://localhost:8000"
+    BACKEND_URL: str = "http://localhost:8010"
     
     # Cookie Configuration
     COOKIE_NAME: str = "access_token"  # Name of the cookie storing JWT
