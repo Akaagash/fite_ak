@@ -11,6 +11,8 @@ from app.core.database import Database
 from app.core.config import settings
 from app.api import auth, jobs
 from app.api import applications
+from app.api import rating
+from app.api import negotiation
 
 
 @asynccontextmanager
@@ -70,8 +72,11 @@ app.include_router(jobs.router)
 # Include application routes
 app.include_router(applications.router)
 
-# Include job routes
-app.include_router(jobs.router)
+# Include rating routes
+app.include_router(rating.router)
+
+# Include negotiation routes
+app.include_router(negotiation.router)
 
 
 @app.get("/")

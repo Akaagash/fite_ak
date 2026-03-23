@@ -1,10 +1,10 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useMode } from '../../context/ModeContext';
 import { useAuth } from '../../context/AuthContext';
 import { motion, AnimatePresence } from 'framer-motion';
-import { LayoutGrid, Map as MapIcon, MapPin, Clock, IndianRupee, Star, Play, Square, Loader2, Navigation, Phone, X, Briefcase, ChevronDown, Filter } from 'lucide-react';
+import { LayoutGrid, Map as MapIcon, MapPin, Clock, IndianRupee, Star, Play, Square, Loader2, Navigation, Phone, X, Briefcase, ChevronDown, Filter, RefreshCw } from 'lucide-react';
 import TextType from '../../components/ui/TextType';
 import { LocationMap } from '../../components/ui/expand-map';
 
@@ -21,14 +21,6 @@ interface NegotiationMessage {
     priceProposal?: number;
 }
 
-interface NegotiationSession {
-    jobId: string;
-    originalPrice: number;
-    currentProposedPrice: number;
-    finalAgreedPrice: number | null;
-    messages: NegotiationMessage[];
-    status: 'active' | 'accepted' | 'rejected' | 'countered';
-}
 
 interface Job {
     id: string;
@@ -48,6 +40,7 @@ interface Job {
     coordinates: [number, number];
     job_type?: string;
     employer_contact?: string;
+    employer_id?: string;
 }
 
 interface LongTermJob {
@@ -70,6 +63,8 @@ const ExploreJobs: React.FC = () => {
     const { mode } = useMode();
     const navigate = useNavigate();
     const auth = useAuth();
+    const authRef = useRef(auth);
+    authRef.current = auth;
     const [viewMode, setViewMode] = useState<'card' | 'map'>('card');
     const [isExploring, setIsExploring] = useState(false);
     const [userLocation, setUserLocation] = useState<[number, number] | null>(null);
@@ -88,22 +83,17 @@ const ExploreJobs: React.FC = () => {
     const [, setIsFetchingJobs] = useState(false);
     const [isApplying, setIsApplying] = useState<string | null>(null);
     const [cardFilterOpen, setCardFilterOpen] = useState<string | null>(null);
+    const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
+    const [isRefreshing, setIsRefreshing] = useState(false);
 
     // Negotiation states
     const [showNegotiationModal, setShowNegotiationModal] = useState(false);
     const [negotiatingJob, setNegotiatingJob] = useState<Job | null>(null);
-    const [negotiationPrice, setNegotiationPrice] = useState<number>(0);
     const [negotiationMessages, setNegotiationMessages] = useState<NegotiationMessage[]>([]);
     const [negotiationReason, setNegotiationReason] = useState<string>('');
-    const [negotiationReasons, setNegotiationReasons] = useState<Record<string, number>>({
-        transportation: 0,
-        materials: 0,
-        labour: 0,
-        weather: 0,
-        urgent: 0
-    });
-    const [negotiationPriceInput, setNegotiationPriceInput] = useState('');
-    const [negotiationStatus, setNegotiationStatus] = useState<'proposing' | 'waiting' | 'accepted' | 'rejected'>('proposing');
+    const [negotiationStatus, setNegotiationStatus] = useState<'idle' | 'waiting_employer' | 'waiting_worker' | 'accepted' | 'rejected'>('idle');
+    const [negotiationId, setNegotiationId] = useState<string | null>(null);
+    const [isSendingMessage, setIsSendingMessage] = useState(false);
 
     // Location permission persistence - initialize from localStorage
     const [locationPermissionGranted, setLocationPermissionGranted] = useState(
@@ -139,8 +129,9 @@ const ExploreJobs: React.FC = () => {
     };
 
 
-    const fetchJobs = useCallback(async () => {
+    const fetchJobs = useCallback(async (isManual?: boolean) => {
         setIsFetchingJobs(true);
+        if (isManual) setIsRefreshing(true);
         try {
             const dailyRes = await fetch(`${API_BASE}/api/jobs?job_type=daily_wage&status=open`, { credentials: 'include' });
             let longRes = await fetch(`${API_BASE}/api/jobs/long-term-matches`, { credentials: 'include' });
@@ -176,7 +167,11 @@ const ExploreJobs: React.FC = () => {
                 } catch { /* ignore fallback errors */ }
             }
 
-            const mappedDaily: Job[] = (dailyData.jobs || []).map((job: any, idx: number) => ({
+            // Filter out user's own posted jobs
+            const currentUserId = authRef.current.user?.user_id;
+            const filteredDailyRaw = (dailyData.jobs || []).filter((job: any) => !currentUserId || job.employer_id !== currentUserId);
+
+            const mappedDaily: Job[] = filteredDailyRaw.map((job: any, idx: number) => ({
                 id: job._id,
                 title: job.title,
                 location: job.location?.city || job.location?.address || 'Unknown',
@@ -192,9 +187,13 @@ const ExploreJobs: React.FC = () => {
                 description: job.description || '',
                 postedAt: formatTimeAgo(job.created_at),
                 coordinates: [job.location?.coordinates?.lat ?? 12.9716, job.location?.coordinates?.lng ?? 77.5946],
+                employer_id: job.employer_id,
             }));
 
-            const mappedLong: LongTermJob[] = (longData.jobs || []).map((job: any) => ({
+            // Filter out user's own long-term jobs too
+            const filteredLongRaw = (longData.jobs || []).filter((job: any) => !currentUserId || job.employer_id !== currentUserId);
+
+            const mappedLong: LongTermJob[] = filteredLongRaw.map((job: any) => ({
                 id: job._id,
                 title: job.title,
                 company: job.employer_name || 'Company',
@@ -222,17 +221,9 @@ const ExploreJobs: React.FC = () => {
             setDailyJobs(mappedDaily);
 
             // If user is authenticated, remove jobs they've already applied to
-            const userId = auth.user?.user_id;
+            const userId = authRef.current.user?.user_id;
             // compute a local fallback matchScore from resume_text when backend didn't provide one
-            let resumeText: string | undefined = (auth.user as any)?.resume_text;
-
-            // If user is authenticated but resume_text not present in context, refresh auth
-            if (auth.user && !resumeText && auth.checkAuth) {
-                try {
-                    await auth.checkAuth();
-                    resumeText = (auth.user as any)?.resume_text;
-                } catch { /* ignore */ }
-            }
+            const resumeText: string | undefined = (authRef.current.user as any)?.resume_text;
 
             const stopwords = new Set(['the','and','is','in','to','of','a','for','on','with','as','by','an','at','from','or','that','this','it','be','are','was','were','has','have','but','not']);
 
@@ -300,26 +291,34 @@ const ExploreJobs: React.FC = () => {
             }
         } finally {
             setIsFetchingJobs(false);
+            setIsRefreshing(false);
+            setLastRefreshed(new Date());
         }
-    }, [auth]);
+    }, []);  // stable — uses authRef inside
 
     useEffect(() => {
         fetchJobs();
     }, [fetchJobs]);
 
+    // Auto-refresh every 5 minutes (300000ms) — no longer polling every 15s
     useEffect(() => {
         const timer = setInterval(() => {
             fetchJobs();
-        }, 15000);
-
-        const onFocus = () => fetchJobs();
-        window.addEventListener('focus', onFocus);
+        }, 300000);
 
         return () => {
             clearInterval(timer);
-            window.removeEventListener('focus', onFocus);
         };
     }, [fetchJobs]);
+
+    // Reset state when switching between daily and long-term modes
+    useEffect(() => {
+        setIsExploring(false);
+        setFoundJobs([]);
+        setSelectedJob(null);
+        setShowNegotiationModal(false);
+        setShowFilters(false);
+    }, [mode]);
 
     useEffect(() => {
         if (isExploring) {
@@ -354,81 +353,156 @@ const ExploreJobs: React.FC = () => {
         }
     };
 
-    // Negotiation handlers
+    // ── Negotiation handlers (real backend) ────────────────────────────────
+
     const handleNegotiateClick = (job: Job) => {
         setNegotiatingJob(job);
-        setNegotiationPrice(job.salaryAmount);
-        setNegotiationPriceInput(job.salaryAmount.toString());
         setNegotiationMessages([]);
         setNegotiationReason('');
-        setNegotiationReasons({
-            transportation: 0,
-            materials: 0,
-            labour: 0,
-            weather: 0,
-            urgent: 0
-        });
-        setNegotiationStatus('proposing');
+        setNegotiationStatus('idle');
+        setNegotiationId(null);
+        setIsSendingMessage(false);
         setShowNegotiationModal(true);
     };
 
-    const calculateTotalProposal = () => {
-        const basePrice = negotiatingJob?.salaryAmount || 0;
-        const totalReasons = Object.values(negotiationReasons).reduce((a, b) => a + b, 0);
-        return basePrice + totalReasons;
-    };
+    // Poll for negotiation updates when modal is open
+    useEffect(() => {
+        if (!showNegotiationModal || !negotiationId) return;
+        let active = true;
 
-    const handleSendNegotiationMessage = () => {
-        if (!negotiatingJob || !negotiationReason.trim()) return;
+        const poll = async () => {
+            try {
+                const res = await fetch(`${API_BASE}/api/negotiations/${negotiationId}`, { credentials: 'include' });
+                if (!res.ok || !active) return;
+                const data = await res.json();
+                const neg = data.negotiation;
+                if (!neg) return;
 
-        const user = auth?.user;
-        const newMessage: NegotiationMessage = {
-            id: Date.now().toString(),
-            sender: 'worker',
-            senderName: user?.email?.split('@')[0] || 'Worker',
-            message: negotiationReason,
-            timestamp: new Date().toLocaleTimeString(),
-            type: 'message'
+                // Map backend messages to frontend format
+                const mapped: NegotiationMessage[] = (neg.messages || []).map((m: any, i: number) => ({
+                    id: `${i}-${m.sent_at}`,
+                    sender: m.sender_role === 'worker' ? 'worker' : 'employer',
+                    senderName: m.sender_name || m.sender_role,
+                    message: m.message,
+                    timestamp: new Date(m.sent_at).toLocaleTimeString(),
+                    type: m.offer_amount ? 'counter_offer' : 'message',
+                    priceProposal: m.offer_amount || undefined,
+                }));
+
+                if (active) {
+                    setNegotiationMessages(mapped);
+                    setNegotiationStatus(neg.status);
+                }
+            } catch { /* ignore poll errors */ }
         };
 
-        setNegotiationMessages([...negotiationMessages, newMessage]);
-        setNegotiationReason('');
+        poll(); // immediate first poll
+        const timer = setInterval(poll, 3000);
+        return () => { active = false; clearInterval(timer); };
+    }, [showNegotiationModal, negotiationId]);
 
-        // Simulate employer response after a delay
-        setTimeout(() => {
-            const employerResponse: NegotiationMessage = {
-                id: (Date.now() + 1).toString(),
-                sender: 'employer',
-                senderName: negotiatingJob.employer,
-                message: `Thanks for explaining. I understand your costs. I can offer ₹${Math.round(calculateTotalProposal() * 0.9)}/day as a counter-offer.`,
-                timestamp: new Date().toLocaleTimeString(),
-                type: 'counter_offer',
-                priceProposal: Math.round(calculateTotalProposal() * 0.9)
-            };
+    const handleSendNegotiationMessage = async () => {
+        if (!negotiatingJob || !negotiationReason.trim() || isSendingMessage) return;
+        setIsSendingMessage(true);
 
-            setNegotiationMessages(prev => [...prev, employerResponse]);
-        }, 1500);
+        try {
+            // Extract offer amount if the message contains a price like ₹600
+            const priceMatch = negotiationReason.match(/₹(\d+)/);
+            const offerAmount = priceMatch ? parseFloat(priceMatch[1]) : undefined;
+
+            if (!negotiationId) {
+                // First message → start a new negotiation
+                const res = await fetch(`${API_BASE}/api/negotiations/start`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'include',
+                    body: JSON.stringify({
+                        job_id: negotiatingJob.id,
+                        employer_id: negotiatingJob.employer_id || '',
+                        employer_name: negotiatingJob.employer,
+                        original_price: negotiatingJob.salaryAmount,
+                        message: negotiationReason,
+                        offer_amount: offerAmount,
+                    }),
+                });
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    throw new Error(err.detail || 'Failed to start negotiation');
+                }
+                const data = await res.json();
+                setNegotiationId(data.negotiation._id);
+            } else {
+                // Subsequent message → send to existing negotiation
+                const res = await fetch(`${API_BASE}/api/negotiations/${negotiationId}/message`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'include',
+                    body: JSON.stringify({
+                        message: negotiationReason,
+                        offer_amount: offerAmount,
+                    }),
+                });
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    throw new Error(err.detail || 'Failed to send message');
+                }
+            }
+            setNegotiationReason('');
+        } catch (err: any) {
+            alert(err.message || 'Failed to send message');
+        } finally {
+            setIsSendingMessage(false);
+        }
     };
 
-    const handleAcceptNegotiatedPrice = () => {
-        if (!negotiatingJob) return;
-        const finalPrice = negotiatingJob.salaryAmount + Object.values(negotiationReasons).reduce((a, b) => a + b, 0);
-        setNegotiationMessages([...negotiationMessages, {
-            id: Date.now().toString(),
-            sender: 'worker',
-            senderName: auth?.user?.email?.split('@')[0] || 'Worker',
-            message: `Great! I accept the final rate of ₹${finalPrice}/day. Let's proceed!`,
-            timestamp: new Date().toLocaleTimeString(),
-            type: 'acceptance',
-            priceProposal: finalPrice
-        }]);
-        setNegotiationStatus('accepted');
+    const handleAcceptNegotiatedPrice = async () => {
+        if (!negotiationId) return;
+        try {
+            const res = await fetch(`${API_BASE}/api/negotiations/${negotiationId}/accept`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
+                body: JSON.stringify({}),
+            });
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                throw new Error(err.detail || 'Failed to accept');
+            }
+            const data = await res.json();
+            setNegotiationStatus('accepted');
+            if (data.final_price && negotiatingJob) {
+                // Optionally apply directly
+            }
+        } catch (err: any) {
+            alert(err.message || 'Failed to accept negotiation');
+        }
     };
 
-    const handleProceedWithJob = () => {
-        if (!negotiatingJob) return;
-        const finalPrice = negotiatingJob.salaryAmount + Object.values(negotiationReasons).reduce((a, b) => a + b, 0);
-        applyToJob(negotiatingJob.id, 'daily', finalPrice);
+    const handleRejectNegotiation = async () => {
+        if (!negotiationId) {
+            setShowNegotiationModal(false);
+            return;
+        }
+        try {
+            await fetch(`${API_BASE}/api/negotiations/${negotiationId}/reject`, {
+                method: 'POST',
+                credentials: 'include',
+            });
+        } catch { /* ignore */ }
+        setShowNegotiationModal(false);
+    };
+
+    const handleProceedWithJob = async () => {
+        if (!negotiatingJob || !negotiationId) return;
+        // Find the final agreed price from the last offer in messages
+        let finalPrice = negotiatingJob.salaryAmount;
+        for (let i = negotiationMessages.length - 1; i >= 0; i--) {
+            if (negotiationMessages[i].priceProposal) {
+                finalPrice = negotiationMessages[i].priceProposal!;
+                break;
+            }
+        }
+        await applyToJob(negotiatingJob.id, 'daily', finalPrice);
         setShowNegotiationModal(false);
     };
 
@@ -533,6 +607,21 @@ const ExploreJobs: React.FC = () => {
                     <p className="text-sm text-neutral-500 mt-1 font-medium">
                         {isDaily ? "Find daily wage opportunities near you" : "Discover long-term career opportunities"}
                     </p>
+                    {/* Last Refreshed + Manual Refresh */}
+                    {lastRefreshed && (
+                        <span className="text-xs text-neutral-400 font-medium hidden sm:inline">
+                            Updated {Math.round((Date.now() - lastRefreshed.getTime()) / 60000) || '<1'}m ago
+                        </span>
+                    )}
+                    <button
+                        onClick={() => fetchJobs(true)}
+                        disabled={isRefreshing}
+                        className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-sm font-medium bg-white border-2 border-neutral-200 text-neutral-700 hover:bg-neutral-50 hover:border-neutral-300 transition-all shadow-sm disabled:opacity-50"
+                        title="Refresh jobs"
+                    >
+                        <RefreshCw size={14} className={isRefreshing ? 'animate-spin' : ''} />
+                        <span className="hidden sm:inline">Refresh</span>
+                    </button>
                 </div>
 
                 {/* Right: Control Bar */}
@@ -1275,7 +1364,7 @@ const ExploreJobs: React.FC = () => {
                 )}
             </AnimatePresence>
 
-            {/* Price Negotiation Modal */}
+            {/* Price Negotiation Chat Modal */}
             <AnimatePresence>
                 {showNegotiationModal && negotiatingJob && (
                     <>
@@ -1284,211 +1373,151 @@ const ExploreJobs: React.FC = () => {
                             animate={{ opacity: 1 }}
                             exit={{ opacity: 0 }}
                             className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[100]"
-                            onClick={() => setShowNegotiationModal(false)}
+                            onClick={handleRejectNegotiation}
                         />
                         <motion.div
-                            initial={{ opacity: 0, scale: 0.9, y: 20 }}
-                            animate={{ opacity: 1, scale: 1, y: 0 }}
-                            exit={{ opacity: 0, scale: 0.9, y: 20 }}
-                            className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[90vw] max-w-2xl max-h-[90vh] z-[101] overflow-auto"
+                            initial={{ opacity: 0, y: 40 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            exit={{ opacity: 0, y: 40 }}
+                            transition={{ type: 'spring', stiffness: 400, damping: 32 }}
+                            className="fixed bottom-0 left-0 right-0 sm:bottom-auto sm:top-1/2 sm:left-1/2 sm:-translate-x-1/2 sm:-translate-y-1/2 w-full sm:w-[90vw] sm:max-w-lg z-[101]"
                         >
-                            <div className="rounded-2xl bg-white border-2 border-neutral-200 shadow-2xl overflow-hidden flex flex-col h-[90vh]">
+                            <div className="rounded-t-2xl sm:rounded-2xl bg-white border border-neutral-200 shadow-2xl overflow-hidden flex flex-col" style={{ maxHeight: '85vh' }}>
                                 {/* Header */}
-                                <div className="px-6 py-4 bg-gradient-to-r from-amber-50 to-orange-50 border-b border-neutral-200 flex items-center justify-between">
+                                <div className="px-5 py-4 border-b border-neutral-100 flex items-center justify-between bg-white">
                                     <div>
-                                        <h3 className="text-xl font-bold text-neutral-800">Negotiate Price</h3>
-                                        <p className="text-sm text-neutral-600 mt-1">{negotiatingJob.title} • {negotiatingJob.employer}</p>
+                                        <h3 className="text-base font-bold text-neutral-900">Negotiate Price</h3>
+                                        <p className="text-xs text-neutral-500 mt-0.5">{negotiatingJob.title} · {negotiatingJob.employer}</p>
                                     </div>
                                     <button
-                                        onClick={() => setShowNegotiationModal(false)}
-                                        className="p-2 rounded-lg bg-white border border-neutral-300 hover:bg-neutral-100 transition-colors"
+                                        onClick={handleRejectNegotiation}
+                                        className="p-1.5 rounded-lg hover:bg-neutral-100 transition-colors"
                                     >
-                                        <X size={20} className="text-neutral-700" />
+                                        <X size={18} className="text-neutral-500" />
                                     </button>
                                 </div>
 
-                                {/* Content */}
-                                <div className="flex-1 overflow-auto flex flex-col">
-                                    {/* Chat Area */}
-                                    <div className="flex-1 p-6 space-y-4 overflow-y-auto bg-gradient-to-b from-neutral-50 to-white">
-                                        {negotiationMessages.length === 0 ? (
-                                            <div className="flex flex-col items-center justify-center h-full text-center py-12">
-                                                <div className="w-12 h-12 rounded-full bg-amber-100 flex items-center justify-center mb-3">
-                                                    <Briefcase size={24} className="text-amber-600" />
-                                                </div>
-                                                <p className="text-neutral-600 font-medium">Start Negotiating</p>
-                                                <p className="text-sm text-neutral-500 mt-1">Original Rate: <strong>₹{negotiatingJob.salaryAmount}/day</strong></p>
+                                {/* Chat Messages */}
+                                <div className="flex-1 overflow-y-auto px-5 py-4 space-y-3 bg-neutral-50" style={{ minHeight: '240px', maxHeight: '380px' }}>
+                                    {/* System message showing base rate */}
+                                    <div className="flex justify-center">
+                                        <span className="text-xs text-neutral-400 bg-white px-3 py-1 rounded-full border border-neutral-100">Base rate: ₹{negotiatingJob.salaryAmount}/day</span>
+                                    </div>
+
+                                    {negotiationMessages.length === 0 ? (
+                                        <div className="flex flex-col items-center justify-center py-8 text-center">
+                                            <div className="w-10 h-10 rounded-full bg-neutral-100 flex items-center justify-center mb-3">
+                                                <IndianRupee size={18} className="text-neutral-400" />
                                             </div>
-                                        ) : (
-                                            negotiationMessages.map((msg) => (
+                                            <p className="text-sm text-neutral-500">Type your price proposal to start negotiating</p>
+                                            <p className="text-xs text-neutral-400 mt-1">Tip: Include ₹ amount in your message, e.g. "I'd like ₹600/day"</p>
+                                        </div>
+                                    ) : (
+                                        <>
+                                            {negotiationMessages.map((msg) => (
                                                 <motion.div
                                                     key={msg.id}
-                                                    initial={{ opacity: 0, y: 10 }}
+                                                    initial={{ opacity: 0, y: 8 }}
                                                     animate={{ opacity: 1, y: 0 }}
                                                     className={`flex ${msg.sender === 'worker' ? 'justify-end' : 'justify-start'}`}
                                                 >
-                                                    <div className={`max-w-xs px-4 py-3 rounded-lg ${
+                                                    <div className={`max-w-[75%] px-3.5 py-2.5 rounded-2xl text-sm ${
                                                         msg.sender === 'worker'
-                                                            ? 'bg-emerald-600 text-white'
-                                                            : 'bg-neutral-200 text-neutral-800'
+                                                            ? 'bg-neutral-900 text-white rounded-br-md'
+                                                            : 'bg-white text-neutral-800 border border-neutral-200 rounded-bl-md shadow-sm'
                                                     }`}>
-                                                        <p className="text-xs font-semibold mb-1 opacity-75">{msg.senderName}</p>
-                                                        <p className={msg.type === 'counter_offer' ? 'font-bold' : ''}>{msg.message}</p>
                                                         {msg.priceProposal && (
-                                                            <p className="text-xs mt-2 pt-2 border-t border-current border-opacity-30">
-                                                                Proposed: ₹{msg.priceProposal}/day
-                                                            </p>
+                                                            <div className={`text-xs font-bold mb-1 ${msg.sender === 'worker' ? 'text-emerald-300' : 'text-amber-600'}`}>
+                                                                ₹{msg.priceProposal}/day
+                                                            </div>
                                                         )}
-                                                        <p className="text-xs mt-2 opacity-70">{msg.timestamp}</p>
+                                                        <p>{msg.message}</p>
+                                                        <p className="text-[10px] mt-1.5 text-neutral-400">{msg.timestamp}</p>
                                                     </div>
                                                 </motion.div>
-                                            ))
-                                        )}
-                                    </div>
-
-                                    {/* Cost Breakdown */}
-                                    <div className="px-6 py-4 bg-neutral-50 border-t border-neutral-200">
-                                        <p className="text-sm font-semibold text-neutral-700 mb-3">Cost Breakdown</p>
-                                        <div className="space-y-2 text-sm">
-                                            <div className="flex justify-between">
-                                                <span className="text-neutral-600">Base Rate:</span>
-                                                <span className="font-medium text-neutral-800">₹{negotiatingJob.salaryAmount}/day</span>
-                                            </div>
-                                            {Object.entries(negotiationReasons).map(([key, value]) => (
-                                                value > 0 && (
-                                                    <div key={key} className="flex justify-between">
-                                                        <span className="text-neutral-600 capitalize">{key.replace(/([A-Z])/g, ' $1')}:</span>
-                                                        <span className="font-medium text-neutral-800">+₹{value}/day</span>
-                                                    </div>
-                                                )
                                             ))}
-                                            <div className="flex justify-between pt-2 border-t border-neutral-300">
-                                                <span className="font-semibold text-neutral-800">Total Proposal:</span>
-                                                <span className="font-bold text-amber-600">₹{calculateTotalProposal()}/day</span>
-                                            </div>
-                                        </div>
-                                    </div>
 
-                                    {/* Cost Reasons */}
-                                    <div className="px-6 py-4 border-t border-neutral-200 bg-white">
-                                        <p className="text-sm font-semibold text-neutral-700 mb-3">Add Cost Reasons</p>
-                                        <div className="space-y-3">
-                                            <div className="grid grid-cols-2 gap-2">
-                                                {[
-                                                    { key: 'transportation', label: '🚗 Transportation', max: 100 },
-                                                    { key: 'materials', label: '📦 Materials', max: 150 },
-                                                    { key: 'labour', label: '💪 Labour', max: 150 },
-                                                    { key: 'weather', label: '⛈️ Extreme Weather', max: 100 },
-                                                    { key: 'urgent', label: '⚡ Urgent Service', max: 200 }
-                                                ].map(({ key, label, max }) => {
-                                                    const currentValue = negotiationReasons[key as keyof typeof negotiationReasons] || 0;
-                                                    return (
-                                                        <div
-                                                            key={key}
-                                                            className={`p-3 rounded-lg border-2 cursor-pointer transition-all ${
-                                                                currentValue === 0
-                                                                    ? 'border-neutral-300 bg-neutral-50 hover:border-amber-400 hover:bg-amber-50'
-                                                                    : 'border-amber-500 bg-amber-50'
-                                                            }`}
-                                                        >
-                                                            <div className="flex items-center justify-between mb-2">
-                                                                <span className="text-xs font-semibold text-neutral-700">{label}</span>
-                                                                <span className={`text-xs font-bold ${currentValue > 0 ? 'text-amber-600' : 'text-neutral-500'}`}>
-                                                                    ₹{currentValue}
-                                                                </span>
+                                            {/* Waiting indicator */}
+                                            {negotiationStatus === 'waiting_employer' && (
+                                                <div className="flex justify-start">
+                                                    <div className="bg-white border border-neutral-200 rounded-2xl rounded-bl-md px-4 py-3 shadow-sm">
+                                                        <div className="flex items-center gap-2">
+                                                            <div className="flex gap-1">
+                                                                <span className="w-1.5 h-1.5 bg-neutral-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                                                                <span className="w-1.5 h-1.5 bg-neutral-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                                                                <span className="w-1.5 h-1.5 bg-neutral-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
                                                             </div>
-                                                            <input
-                                                                type="range"
-                                                                min="0"
-                                                                max={max}
-                                                                value={currentValue}
-                                                                onChange={(e) => setNegotiationReasons({
-                                                                    ...negotiationReasons,
-                                                                    [key]: parseInt(e.target.value)
-                                                                })}
-                                                                style={{
-                                                                    width: '100%',
-                                                                    height: '8px',
-                                                                    borderRadius: '8px',
-                                                                    background: `linear-gradient(to right, #f59e0b 0%, #f59e0b ${(currentValue / max) * 100}%, #e5e7eb ${(currentValue / max) * 100}%, #e5e7eb 100%)`,
-                                                                    outline: 'none',
-                                                                    WebkitAppearance: 'none',
-                                                                    appearance: 'none' as any,
-                                                                    cursor: 'pointer',
-                                                                }}
-                                                            />
-                                                            <style>{`
-                                                                input[type='range']::-webkit-slider-thumb {
-                                                                    -webkit-appearance: none;
-                                                                    appearance: none;
-                                                                    width: 20px;
-                                                                    height: 20px;
-                                                                    border-radius: 50%;
-                                                                    background: #f59e0b;
-                                                                    cursor: pointer;
-                                                                    border: 2px solid #fff;
-                                                                    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
-                                                                }
-                                                                input[type='range']::-moz-range-thumb {
-                                                                    width: 20px;
-                                                                    height: 20px;
-                                                                    border-radius: 50%;
-                                                                    background: #f59e0b;
-                                                                    cursor: pointer;
-                                                                    border: 2px solid #fff;
-                                                                    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
-                                                                }
-                                                            `}</style>
-                                                            <p className="text-xs text-neutral-500 mt-2">Max: ₹{max}</p>
+                                                            <span className="text-xs text-neutral-500">Waiting for employer to respond...</span>
                                                         </div>
-                                                    );
-                                                })}
-                                            </div>
-                                        </div>
-                                    </div>
+                                                    </div>
+                                                </div>
+                                            )}
 
-                                    {/* Message Input */}
-                                    <div className="px-6 py-4 border-t border-neutral-200 bg-white">
+                                            {/* Accepted indicator */}
+                                            {negotiationStatus === 'accepted' && (
+                                                <div className="flex justify-center">
+                                                    <span className="text-xs text-emerald-600 bg-emerald-50 px-3 py-1.5 rounded-full border border-emerald-200 font-medium">✓ Price agreed! You can now proceed with the job.</span>
+                                                </div>
+                                            )}
+
+                                            {/* Rejected indicator */}
+                                            {negotiationStatus === 'rejected' && (
+                                                <div className="flex justify-center">
+                                                    <span className="text-xs text-red-600 bg-red-50 px-3 py-1.5 rounded-full border border-red-200 font-medium">Negotiation closed</span>
+                                                </div>
+                                            )}
+                                        </>
+                                    )}
+                                </div>
+
+                                {/* Input Area — disabled when waiting for employer or negotiation is over */}
+                                <div className="px-5 py-3 border-t border-neutral-100 bg-white">
+                                    {negotiationStatus === 'accepted' || negotiationStatus === 'rejected' ? (
+                                        <p className="text-xs text-neutral-400 text-center py-1">This negotiation is {negotiationStatus}</p>
+                                    ) : negotiationStatus === 'waiting_employer' ? (
+                                        <p className="text-xs text-neutral-400 text-center py-1">Waiting for employer's response before you can send another message</p>
+                                    ) : (
                                         <div className="flex gap-2">
                                             <input
                                                 type="text"
-                                                placeholder="Explain your costs..."
+                                                placeholder={negotiationId ? 'Type your message...' : 'Type your price proposal, e.g. I\'d like ₹600/day...'}
                                                 value={negotiationReason}
                                                 onChange={(e) => setNegotiationReason(e.target.value)}
-                                                onKeyPress={(e) => e.key === 'Enter' && handleSendNegotiationMessage()}
-                                                className="flex-1 px-4 py-2 rounded-lg border border-neutral-300 focus:border-amber-500 focus:outline-none text-sm text-neutral-900 placeholder:text-neutral-500"
+                                                onKeyDown={(e) => e.key === 'Enter' && !isSendingMessage && handleSendNegotiationMessage()}
+                                                disabled={isSendingMessage}
+                                                className="flex-1 px-3.5 py-2.5 rounded-xl border border-neutral-200 bg-neutral-50 focus:border-neutral-400 focus:bg-white focus:outline-none text-sm text-neutral-900 placeholder:text-neutral-400 transition-colors disabled:opacity-50"
                                             />
                                             <button
                                                 onClick={handleSendNegotiationMessage}
-                                                disabled={!negotiationReason.trim()}
-                                                className="px-4 py-2 rounded-lg bg-amber-600 text-white font-medium hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                                                disabled={!negotiationReason.trim() || isSendingMessage}
+                                                className="px-4 py-2.5 rounded-xl bg-neutral-900 text-white text-sm font-medium hover:bg-neutral-800 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
                                             >
-                                                Send
+                                                {isSendingMessage ? '...' : 'Send'}
                                             </button>
                                         </div>
-                                    </div>
+                                    )}
                                 </div>
 
-                                {/* Footer Actions */}
-                                <div className="px-6 py-4 bg-neutral-50 border-t border-neutral-200 flex gap-3">
+                                {/* Bottom Actions */}
+                                <div className="px-5 py-3 border-t border-neutral-100 bg-neutral-50 flex gap-2">
                                     <button
-                                        onClick={() => setShowNegotiationModal(false)}
-                                        className="flex-1 py-2 rounded-lg border border-neutral-300 text-neutral-700 font-medium hover:bg-neutral-100 transition-colors"
+                                        onClick={handleRejectNegotiation}
+                                        className="flex-1 py-2.5 rounded-xl border border-neutral-200 text-neutral-600 text-sm font-medium hover:bg-neutral-100 transition-colors"
                                     >
-                                        Disagree & Close
+                                        {negotiationId ? 'Close & Reject' : 'Cancel'}
                                     </button>
                                     {negotiationStatus === 'accepted' ? (
                                         <button
                                             onClick={handleProceedWithJob}
-                                            className="flex-1 py-2 rounded-lg bg-emerald-600 text-white font-medium hover:bg-emerald-700 transition-colors"
+                                            className="flex-1 py-2.5 rounded-xl bg-emerald-600 text-white text-sm font-semibold hover:bg-emerald-700 transition-colors"
                                         >
-                                            Accept & Proceed
+                                            Accept & Proceed ✓
                                         </button>
                                     ) : (
                                         <button
                                             onClick={handleAcceptNegotiatedPrice}
-                                            disabled={!negotiationMessages.some(m => m.type === 'counter_offer')}
-                                            className="flex-1 py-2 rounded-lg bg-amber-600 text-white font-medium hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                                            disabled={!negotiationMessages.some(m => m.type === 'counter_offer') || negotiationStatus === 'rejected'}
+                                            className="flex-1 py-2.5 rounded-xl bg-neutral-900 text-white text-sm font-semibold hover:bg-neutral-800 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
                                         >
                                             Accept Offer
                                         </button>
