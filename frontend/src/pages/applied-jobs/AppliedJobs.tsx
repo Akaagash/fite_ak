@@ -59,6 +59,7 @@ const AppliedJobs: React.FC = () => {
     const [chatMessage, setChatMessage] = useState('');
     const [offerAmount, setOfferAmount] = useState('');
     const [isSendingMessage, setIsSendingMessage] = useState(false);
+    const [isCompleting, setIsCompleting] = useState(false);
 
     const isDaily = mode === 'daily';
 
@@ -166,6 +167,30 @@ const AppliedJobs: React.FC = () => {
         } finally {
             setCancellingId(null);
             setSelectedAppId(null);
+        }
+    };
+
+    const handleMarkCompleted = async () => {
+        if (!selectedApplication) return;
+        setIsCompleting(true);
+        try {
+            const response = await fetch(`http://localhost:8000/api/jobs/${selectedApplication.job_id}/applicants/${selectedApplication._id}/status`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
+                body: JSON.stringify({ status: 'completed' })
+            });
+            if (response.ok) {
+                await fetchApplications();
+                await refreshSelectedApplication(selectedApplication._id);
+            } else {
+                const data = await response.json().catch(() => ({}));
+                alert(data.detail || 'Failed to mark as completed');
+            }
+        } catch (err: any) {
+            alert('Failed to mark as completed');
+        } finally {
+            setIsCompleting(false);
         }
     };
 
@@ -580,6 +605,22 @@ const AppliedJobs: React.FC = () => {
                                                 <Send size={14} />
                                             </button>
                                         </div>
+                                    </div>
+                                )}
+
+                                {normalizedStatus(selectedApplication.status) === 'accepted' && (
+                                    <div className="p-5 border-t border-neutral-200">
+                                        <button
+                                            onClick={handleMarkCompleted}
+                                            disabled={isCompleting}
+                                            className="w-full py-3 rounded-xl bg-emerald-600 text-white font-bold hover:bg-emerald-700 transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
+                                        >
+                                            {isCompleting ? <Loader2 size={18} className="animate-spin" /> : <CheckCircle size={18} />}
+                                            {isCompleting ? 'Marking...' : 'Mark Job as Completed'}
+                                        </button>
+                                        <p className="text-center text-xs text-neutral-500 mt-2">
+                                            Only mark as completed once the work is securely done and payment received. Both you and the employer must complete the job.
+                                        </p>
                                     </div>
                                 )}
                             </div>

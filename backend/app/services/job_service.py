@@ -430,12 +430,42 @@ class JobService:
                 )
 
             if new_status == "completed":
-                await jobs_collection.update_one(
-                    {"_id": ObjectId(job_id)},
-                    {"$set": {"status": "completed", "updated_at": datetime.utcnow()}}
+                role = "employer" if str(employer_id) == str(job.get("employer_id", "")) else "worker"
+                
+                # Update the completion flags on the application
+                update_doc = {
+                    "$set": {
+                        f"{role}_completed": True, 
+                        "updated_at": datetime.utcnow()
+                    }
+                }
+                await applications_collection.update_one(
+                    {"_id": ObjectId(application_id)},
+                    update_doc
                 )
+                
+                # Fetch fresh app to check both flags
+                fresh_app = await applications_collection.find_one({"_id": ObjectId(application_id)})
+                
+                # If both are true, or if we assume employer completion is enough for now
+                is_worker_complete = fresh_app.get("worker_completed", False)
+                is_employer_complete = fresh_app.get("employer_completed", False)
+                
+                if is_worker_complete and is_employer_complete:
+                    await jobs_collection.update_one(
+                        {"_id": ObjectId(job_id)},
+                        {"$set": {"status": "completed", "updated_at": datetime.utcnow()}}
+                    )
+                    # Keep the application status as 'completed'
+                else:
+                    # Update status to 'accepted' to keep it active until both complete
+                    # (preventing the default new_status update from overriding to 'completed' prematurely)
+                    await applications_collection.update_one(
+                        {"_id": ObjectId(application_id)},
+                        {"$set": {"status": "accepted", "updated_at": datetime.utcnow()}}
+                    )
 
-            if new_status in ["pending", "negotiating"]:
+            if new_status in ["pending", "negotiating"] and job.get("status") != "ongoing":
                 await jobs_collection.update_one(
                     {"_id": ObjectId(job_id)},
                     {"$set": {"status": "open", "updated_at": datetime.utcnow()}}

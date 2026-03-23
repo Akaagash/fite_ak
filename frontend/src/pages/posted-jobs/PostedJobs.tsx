@@ -2,8 +2,9 @@ import React, { useState, useEffect } from 'react';
 import { useMode } from '../../context/ModeContext';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { LayoutGrid, List, Plus, MapPin, Clock, IndianRupee, Users, X, ChevronRight, ChevronDown, Search, Briefcase, FileText, Check, Loader2 } from 'lucide-react';
+import { LayoutGrid, List, Plus, MapPin, Clock, IndianRupee, Users, X, ChevronDown, Search, Briefcase, FileText, Check, Loader2 } from 'lucide-react';
 import TextType from '../../components/ui/TextType';
+import { useAuth } from '../../context/AuthContext';
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8010';
 
 
@@ -658,7 +659,8 @@ const PostedJobs: React.FC = () => {
     const [updatingJobId, setUpdatingJobId] = useState<string | null>(null);
     const [statusUpdateError, setStatusUpdateError] = useState('');
     const [isDrawerOpen, setIsDrawerOpen] = useState(false);
-
+    const auth = useAuth();
+    
     const isDaily = mode === 'daily';
 
     useEffect(() => {
@@ -671,10 +673,12 @@ const PostedJobs: React.FC = () => {
         setIsLoading(true);
         setFetchError('');
         try {
+            const userId = auth?.user?.id;
+            const queryParams = userId ? `&employer_id=${userId}` : '';
             const statuses = ['open', 'ongoing', 'completed'];
             const statusResponses = await Promise.all(
                 statuses.map((s) =>
-                    fetch(`${API_BASE}/api/jobs?status=${s}&skip=0&limit=200`, { credentials: 'include' })
+                    fetch(`${API_BASE}/api/jobs?status=${s}&skip=0&limit=200${queryParams}`, { credentials: 'include' })
                 )
             );
             const statusPayloads = await Promise.all(

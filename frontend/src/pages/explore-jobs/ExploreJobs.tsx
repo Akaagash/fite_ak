@@ -8,7 +8,10 @@ import { LayoutGrid, Map as MapIcon, MapPin, Clock, IndianRupee, Star, Play, Squ
 import TextType from '../../components/ui/TextType';
 import { LocationMap } from '../../components/ui/expand-map';
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8010';
+// import { useAuth } from '../../context/AuthContext';
+
+const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+const WS_BASE = API_BASE.replace(/^http/, 'ws');
 
 // Negotiation types
 interface NegotiationMessage {
@@ -91,7 +94,7 @@ const ExploreJobs: React.FC = () => {
     const [negotiatingJob, setNegotiatingJob] = useState<Job | null>(null);
     const [negotiationMessages, setNegotiationMessages] = useState<NegotiationMessage[]>([]);
     const [negotiationReason, setNegotiationReason] = useState<string>('');
-    const [negotiationStatus, setNegotiationStatus] = useState<'idle' | 'waiting_employer' | 'waiting_worker' | 'accepted' | 'rejected'>('idle');
+    const [negotiationStatus, setNegotiationStatus] = useState<'idle' | 'active' | 'waiting_employer' | 'waiting_worker' | 'accepted' | 'rejected' | 'closed'>('idle');
     const [negotiationId, setNegotiationId] = useState<string | null>(null);
     const [isSendingMessage, setIsSendingMessage] = useState(false);
 
@@ -353,65 +356,91 @@ const ExploreJobs: React.FC = () => {
         }
     };
 
+    // ── WebSocket Reference ────────────────────────────────────────────────
+    const wsRef = useRef<WebSocket | null>(null);
+
     // ── Negotiation handlers (real backend) ────────────────────────────────
 
-    const handleNegotiateClick = (job: Job) => {
+    const handleNegotiateClick = async (job: Job) => {
         setNegotiatingJob(job);
         setNegotiationMessages([]);
         setNegotiationReason('');
-        setNegotiationStatus('idle');
+        setNegotiationStatus('active');
         setNegotiationId(null);
         setIsSendingMessage(false);
         setShowNegotiationModal(true);
+        
+        // Try to fetch existing active negotiation
+        try {
+            const res = await fetch(`${API_BASE}/api/negotiations/my/all`, { credentials: 'include' });
+            if (res.ok) {
+                const data = await res.json();
+                const existing = data.negotiations.find((n: any) => n.job_id === job.id && n.status === 'active');
+                if (existing) {
+                    setNegotiationId(existing._id);
+                    connectWebSocket(existing._id);
+                }
+            }
+        } catch { /* ignore */ }
     };
 
-    // Poll for negotiation updates when modal is open
-    useEffect(() => {
-        if (!showNegotiationModal || !negotiationId) return;
-        let active = true;
-
-        const poll = async () => {
-            try {
-                const res = await fetch(`${API_BASE}/api/negotiations/${negotiationId}`, { credentials: 'include' });
-                if (!res.ok || !active) return;
-                const data = await res.json();
-                const neg = data.negotiation;
-                if (!neg) return;
-
-                // Map backend messages to frontend format
-                const mapped: NegotiationMessage[] = (neg.messages || []).map((m: any, i: number) => ({
-                    id: `${i}-${m.sent_at}`,
-                    sender: m.sender_role === 'worker' ? 'worker' : 'employer',
-                    senderName: m.sender_name || m.sender_role,
-                    message: m.message,
-                    timestamp: new Date(m.sent_at).toLocaleTimeString(),
-                    type: m.offer_amount ? 'counter_offer' : 'message',
-                    priceProposal: m.offer_amount || undefined,
-                }));
-
-                if (active) {
-                    setNegotiationMessages(mapped);
-                    setNegotiationStatus(neg.status);
-                }
-            } catch { /* ignore poll errors */ }
+    const connectWebSocket = (negId: string) => {
+        if (wsRef.current) wsRef.current.close();
+        const token = document.cookie.split('; ').find(c => c.startsWith('access_token='))?.split('=')[1] || '';
+        const ws = new WebSocket(`${WS_BASE}/api/negotiations/ws/${negId}?token=${token}`);
+        
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            if (data.type === 'history') {
+                const msgs = (data.messages || []).map(mapWsMessage);
+                setNegotiationMessages(msgs);
+                setNegotiationStatus(data.status || 'active');
+            } else if (data.type === 'message') {
+                setNegotiationMessages(prev => {
+                    if (prev.some(m => m.id === `${data.sent_at}-${data.sender_id}`)) return prev; // dedup
+                    return [...prev, mapWsMessage(data)];
+                });
+            } else if (data.type === 'accepted') {
+                setNegotiationStatus('accepted');
+            } else if (data.type === 'session_ended') {
+                setNegotiationStatus(data.status || 'closed');
+            }
         };
+        wsRef.current = ws;
+    };
 
-        poll(); // immediate first poll
-        const timer = setInterval(poll, 3000);
-        return () => { active = false; clearInterval(timer); };
-    }, [showNegotiationModal, negotiationId]);
+    const mapWsMessage = (m: any): NegotiationMessage => ({
+        id: m.id || `${m.sent_at}-${m.sender_id}`,
+        sender: m.sender_role === 'worker' ? 'worker' : 'employer',
+        senderName: m.sender_name || (m.sender_role === 'worker' ? 'You' : 'Employer'),
+        message: m.message,
+        timestamp: new Date(m.sent_at).toLocaleTimeString(),
+        type: m.offer_amount ? 'counter_offer' : 'message',
+        priceProposal: m.offer_amount || undefined,
+    });
+
+    useEffect(() => {
+        return () => wsRef.current?.close();
+    }, []);
 
     const handleSendNegotiationMessage = async () => {
         if (!negotiatingJob || !negotiationReason.trim() || isSendingMessage) return;
         setIsSendingMessage(true);
 
         try {
-            // Extract offer amount if the message contains a price like ₹600
             const priceMatch = negotiationReason.match(/₹(\d+)/);
             const offerAmount = priceMatch ? parseFloat(priceMatch[1]) : undefined;
 
-            if (!negotiationId) {
-                // First message → start a new negotiation
+            if (wsRef.current?.readyState === WebSocket.OPEN) {
+                // Send via WS if connected
+                wsRef.current.send(JSON.stringify({
+                    type: 'message',
+                    message: negotiationReason,
+                    offer_amount: offerAmount,
+                }));
+                setNegotiationReason('');
+            } else if (!negotiationId) {
+                // Start new negotiation then connect WS
                 const res = await fetch(`${API_BASE}/api/negotiations/start`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -425,29 +454,22 @@ const ExploreJobs: React.FC = () => {
                         offer_amount: offerAmount,
                     }),
                 });
-                if (!res.ok) {
-                    const err = await res.json().catch(() => ({}));
-                    throw new Error(err.detail || 'Failed to start negotiation');
-                }
+                if (!res.ok) throw new Error('Failed to start negotiation');
                 const data = await res.json();
                 setNegotiationId(data.negotiation._id);
+                setNegotiationReason('');
+                connectWebSocket(data.negotiation._id);
             } else {
-                // Subsequent message → send to existing negotiation
+                // Fallback REST if WS disconnected but ID exists
                 const res = await fetch(`${API_BASE}/api/negotiations/${negotiationId}/message`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     credentials: 'include',
-                    body: JSON.stringify({
-                        message: negotiationReason,
-                        offer_amount: offerAmount,
-                    }),
+                    body: JSON.stringify({ message: negotiationReason, offer_amount: offerAmount }),
                 });
-                if (!res.ok) {
-                    const err = await res.json().catch(() => ({}));
-                    throw new Error(err.detail || 'Failed to send message');
-                }
+                if (!res.ok) throw new Error('Failed to send message');
+                setNegotiationReason('');
             }
-            setNegotiationReason('');
         } catch (err: any) {
             alert(err.message || 'Failed to send message');
         } finally {
@@ -457,25 +479,14 @@ const ExploreJobs: React.FC = () => {
 
     const handleAcceptNegotiatedPrice = async () => {
         if (!negotiationId) return;
-        try {
-            const res = await fetch(`${API_BASE}/api/negotiations/${negotiationId}/accept`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                credentials: 'include',
-                body: JSON.stringify({}),
-            });
-            if (!res.ok) {
-                const err = await res.json().catch(() => ({}));
-                throw new Error(err.detail || 'Failed to accept');
-            }
-            const data = await res.json();
-            setNegotiationStatus('accepted');
-            if (data.final_price && negotiatingJob) {
-                // Optionally apply directly
-            }
-        } catch (err: any) {
-            alert(err.message || 'Failed to accept negotiation');
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({ type: 'accept' }));
+        } else {
+            try {
+                await fetch(`${API_BASE}/api/negotiations/${negotiationId}/accept`, { method: 'POST', credentials: 'include' });
+            } catch { /* ignore */ }
         }
+        setNegotiationStatus('accepted');
     };
 
     const handleRejectNegotiation = async () => {
@@ -483,13 +494,13 @@ const ExploreJobs: React.FC = () => {
             setShowNegotiationModal(false);
             return;
         }
-        try {
-            await fetch(`${API_BASE}/api/negotiations/${negotiationId}/reject`, {
-                method: 'POST',
-                credentials: 'include',
-            });
-        } catch { /* ignore */ }
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({ type: 'reject' }));
+        } else {
+            try { await fetch(`${API_BASE}/api/negotiations/${negotiationId}/reject`, { method: 'POST', credentials: 'include' }); } catch { /* ignore */ }
+        }
         setShowNegotiationModal(false);
+        wsRef.current?.close();
     };
 
     const handleProceedWithJob = async () => {

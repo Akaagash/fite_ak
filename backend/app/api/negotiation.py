@@ -1,22 +1,28 @@
 """
-Negotiation API Routes
-Real-time price negotiation between workers and employers for daily wage jobs.
-Messages are stored in MongoDB and both parties poll for updates.
+Negotiation API — WebSocket-based real-time chat + REST helpers.
+Messages are held in-memory per session while the chat is active,
+then flushed to MongoDB as a single JSON doc when the session ends.
 """
-from fastapi import APIRouter, HTTPException, status, Cookie, Header
-from typing import Optional, List
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, status, Cookie, Header
+from typing import Optional, Dict, List
 from pydantic import BaseModel, Field
 from datetime import datetime
 from bson import ObjectId
 from app.core.database import Database
 from app.services.auth_service import AuthService
 from app.core.config import settings
-
+import json
+import asyncio
 
 router = APIRouter(prefix="/api/negotiations", tags=["Negotiations"])
 
 
-# ── Auth helper ────────────────────────────────────────────────────────────
+# ── In-memory session store ───────────────────────────────────────────────
+# negotiation_id -> { "messages": [...], "connections": {user_id: ws}, "meta": {...} }
+active_sessions: Dict[str, dict] = {}
+
+
+# ── Auth helpers ──────────────────────────────────────────────────────────
 
 async def get_current_user(
     access_token: Optional[str] = Cookie(None, alias=settings.COOKIE_NAME),
@@ -35,7 +41,15 @@ async def get_current_user(
     return user
 
 
-# ── Request schemas ────────────────────────────────────────────────────────
+async def auth_from_token(token: str):
+    """Authenticate from a raw token string (for WebSocket query params)."""
+    if not token:
+        return None
+    user = await AuthService.verify_user_token(token)
+    return user
+
+
+# ── Schemas ───────────────────────────────────────────────────────────────
 
 class StartNegotiationRequest(BaseModel):
     job_id: str
@@ -46,29 +60,70 @@ class StartNegotiationRequest(BaseModel):
     offer_amount: Optional[float] = None
 
 
-class SendMessageRequest(BaseModel):
-    message: str = Field(..., min_length=1, max_length=1000)
-    offer_amount: Optional[float] = None
-
-
-class AcceptRejectRequest(BaseModel):
-    final_price: Optional[float] = None
-
-
-# ── Helpers ────────────────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────
 
 def _col():
     return Database.get_collection("negotiations")
 
 
+def _notif_col():
+    return Database.get_collection("notifications")
+
+
 def _serialize(doc):
-    """Convert ObjectId fields to strings for JSON serialisation."""
     if doc and "_id" in doc:
         doc["_id"] = str(doc["_id"])
     return doc
 
 
-# ── Endpoints ──────────────────────────────────────────────────────────────
+async def _flush_session(negotiation_id: str, final_status: str = "closed", final_price: float = None):
+    """Save in-memory messages to MongoDB and clean up the session."""
+    session = active_sessions.get(negotiation_id)
+    if not session:
+        return
+
+    col = _col()
+    update: dict = {
+        "$set": {
+            "messages": session["messages"],
+            "status": final_status,
+            "updated_at": datetime.utcnow(),
+        }
+    }
+    if final_price is not None:
+        update["$set"]["final_price"] = final_price
+
+    await col.update_one({"_id": ObjectId(negotiation_id)}, update)
+
+    # Close all WebSocket connections
+    for uid, ws in list(session.get("connections", {}).items()):
+        try:
+            await ws.send_json({"type": "session_ended", "status": final_status, "final_price": final_price})
+            await ws.close()
+        except Exception:
+            pass
+
+    active_sessions.pop(negotiation_id, None)
+
+
+async def _broadcast(negotiation_id: str, message: dict, exclude_uid: str = None):
+    """Broadcast a message to all WebSocket clients in a session."""
+    session = active_sessions.get(negotiation_id)
+    if not session:
+        return
+    dead = []
+    for uid, ws in session.get("connections", {}).items():
+        if uid == exclude_uid:
+            continue
+        try:
+            await ws.send_json(message)
+        except Exception:
+            dead.append(uid)
+    for uid in dead:
+        session["connections"].pop(uid, None)
+
+
+# ── REST Endpoints ────────────────────────────────────────────────────────
 
 @router.post("/start", status_code=status.HTTP_201_CREATED)
 async def start_negotiation(
@@ -76,17 +131,29 @@ async def start_negotiation(
     access_token: Optional[str] = Cookie(None, alias=settings.COOKIE_NAME),
     authorization: Optional[str] = Header(None),
 ):
-    """Worker starts a negotiation session for a daily-wage job."""
+    """Worker starts a negotiation session."""
     user = await get_current_user(access_token, authorization)
     col = _col()
 
-    # Prevent duplicate active negotiations on the same job by the same worker
+    # Prevent duplicates
     existing = await col.find_one({
         "job_id": body.job_id,
         "worker_id": user["user_id"],
         "status": {"$in": ["active", "waiting_employer", "waiting_worker"]},
     })
     if existing:
+        neg_id = str(existing["_id"])
+        # Re-create in-memory session if not present
+        if neg_id not in active_sessions:
+            active_sessions[neg_id] = {
+                "messages": existing.get("messages", []),
+                "connections": {},
+                "meta": {
+                    "worker_id": existing["worker_id"],
+                    "employer_id": existing["employer_id"],
+                    "original_price": existing["original_price"],
+                },
+            }
         return {"negotiation": _serialize(existing), "message": "Negotiation already exists"}
 
     first_msg = {
@@ -95,7 +162,7 @@ async def start_negotiation(
         "sender_name": user.get("full_name") or user.get("email", "").split("@")[0] or "Worker",
         "message": body.message,
         "offer_amount": body.offer_amount,
-        "sent_at": datetime.utcnow(),
+        "sent_at": datetime.utcnow().isoformat(),
     }
 
     doc = {
@@ -105,7 +172,7 @@ async def start_negotiation(
         "employer_id": body.employer_id,
         "employer_name": body.employer_name,
         "original_price": body.original_price,
-        "status": "waiting_employer",  # waiting for employer to respond
+        "status": "active",
         "messages": [first_msg],
         "final_price": None,
         "created_at": datetime.utcnow(),
@@ -113,94 +180,36 @@ async def start_negotiation(
     }
 
     result = await col.insert_one(doc)
-    doc["_id"] = str(result.inserted_id)
+    neg_id = str(result.inserted_id)
+    doc["_id"] = neg_id
 
-    # Also create a notification for the employer
+    # Create in-memory session
+    active_sessions[neg_id] = {
+        "messages": [first_msg],
+        "connections": {},
+        "meta": {
+            "worker_id": user["user_id"],
+            "employer_id": body.employer_id,
+            "original_price": body.original_price,
+        },
+    }
+
+    # Notify employer
     try:
-        notif_col = Database.get_collection("notifications")
-        await notif_col.insert_one({
+        await _notif_col().insert_one({
             "user_id": body.employer_id,
             "type": "negotiation_started",
             "title": "New Price Negotiation",
             "message": f"{doc['worker_name']} wants to negotiate the price for your job",
-            "negotiation_id": str(result.inserted_id),
+            "negotiation_id": neg_id,
             "job_id": body.job_id,
-            "read": False,
-            "created_at": datetime.utcnow(),
-        })
-    except Exception:
-        pass  # non-fatal
-
-    return {"negotiation": doc, "message": "Negotiation started"}
-
-
-@router.post("/{negotiation_id}/message")
-async def send_message(
-    negotiation_id: str,
-    body: SendMessageRequest,
-    access_token: Optional[str] = Cookie(None, alias=settings.COOKIE_NAME),
-    authorization: Optional[str] = Header(None),
-):
-    """Send a message in an active negotiation (either party)."""
-    user = await get_current_user(access_token, authorization)
-    col = _col()
-
-    neg = await col.find_one({"_id": ObjectId(negotiation_id)})
-    if not neg:
-        raise HTTPException(status_code=404, detail="Negotiation not found")
-
-    uid = user["user_id"]
-
-    # Determine role
-    if uid == neg["worker_id"]:
-        role = "worker"
-    elif uid == neg["employer_id"]:
-        role = "employer"
-    else:
-        raise HTTPException(status_code=403, detail="You are not part of this negotiation")
-
-    if neg["status"] in ("accepted", "rejected", "expired"):
-        raise HTTPException(status_code=400, detail=f"Negotiation is already {neg['status']}")
-
-    msg = {
-        "sender_id": uid,
-        "sender_role": role,
-        "sender_name": user.get("full_name") or user.get("email", "").split("@")[0] or role.title(),
-        "message": body.message,
-        "offer_amount": body.offer_amount,
-        "sent_at": datetime.utcnow(),
-    }
-
-    # Toggle waiting status
-    new_status = "waiting_worker" if role == "employer" else "waiting_employer"
-
-    await col.update_one(
-        {"_id": ObjectId(negotiation_id)},
-        {
-            "$push": {"messages": msg},
-            "$set": {"status": new_status, "updated_at": datetime.utcnow()},
-        },
-    )
-
-    # Send notification to the other party
-    other_id = neg["employer_id"] if role == "worker" else neg["worker_id"]
-    try:
-        notif_col = Database.get_collection("notifications")
-        await notif_col.insert_one({
-            "user_id": other_id,
-            "type": "negotiation_message",
-            "title": "New Negotiation Message",
-            "message": f"{msg['sender_name']}: {body.message[:80]}",
-            "negotiation_id": negotiation_id,
-            "job_id": neg["job_id"],
             "read": False,
             "created_at": datetime.utcnow(),
         })
     except Exception:
         pass
 
-    updated = await col.find_one({"_id": ObjectId(negotiation_id)})
-    return {"negotiation": _serialize(updated), "message": "Message sent"}
+    return {"negotiation": doc, "message": "Negotiation started"}
 
 
 @router.get("/{negotiation_id}")
@@ -209,7 +218,7 @@ async def get_negotiation(
     access_token: Optional[str] = Cookie(None, alias=settings.COOKIE_NAME),
     authorization: Optional[str] = Header(None),
 ):
-    """Get a negotiation with all messages (for polling)."""
+    """Get negotiation (includes all messages). Falls back to DB if session not in memory."""
     user = await get_current_user(access_token, authorization)
     col = _col()
 
@@ -220,6 +229,10 @@ async def get_negotiation(
     uid = user["user_id"]
     if uid != neg["worker_id"] and uid != neg["employer_id"]:
         raise HTTPException(status_code=403, detail="You are not part of this negotiation")
+
+    # If there's an active in-memory session, use its messages (more up-to-date)
+    if negotiation_id in active_sessions:
+        neg["messages"] = active_sessions[negotiation_id]["messages"]
 
     return {"negotiation": _serialize(neg)}
 
@@ -227,11 +240,10 @@ async def get_negotiation(
 @router.post("/{negotiation_id}/accept")
 async def accept_negotiation(
     negotiation_id: str,
-    body: AcceptRejectRequest = None,
     access_token: Optional[str] = Cookie(None, alias=settings.COOKIE_NAME),
     authorization: Optional[str] = Header(None),
 ):
-    """Accept the current negotiation and lock in the price."""
+    """Accept the negotiation — flushes chat to DB."""
     user = await get_current_user(access_token, authorization)
     col = _col()
 
@@ -241,23 +253,20 @@ async def accept_negotiation(
 
     uid = user["user_id"]
     if uid != neg["worker_id"] and uid != neg["employer_id"]:
-        raise HTTPException(status_code=403, detail="You are not part of this negotiation")
+        raise HTTPException(status_code=403, detail="Not part of this negotiation")
 
-    if neg["status"] in ("accepted", "rejected"):
-        raise HTTPException(status_code=400, detail=f"Negotiation already {neg['status']}")
-
-    # Find the last offer_amount from messages
+    # Find the last offered price
+    session = active_sessions.get(negotiation_id)
+    messages = session["messages"] if session else neg.get("messages", [])
     final_price = None
-    if body and body.final_price:
-        final_price = body.final_price
-    else:
-        for m in reversed(neg.get("messages", [])):
-            if m.get("offer_amount"):
-                final_price = m["offer_amount"]
-                break
+    for m in reversed(messages):
+        if m.get("offer_amount"):
+            final_price = m["offer_amount"]
+            break
     if not final_price:
         final_price = neg["original_price"]
 
+    # Add acceptance message
     role = "worker" if uid == neg["worker_id"] else "employer"
     accept_msg = {
         "sender_id": uid,
@@ -265,22 +274,34 @@ async def accept_negotiation(
         "sender_name": user.get("full_name") or user.get("email", "").split("@")[0],
         "message": f"Accepted the offer at ₹{final_price}/day",
         "offer_amount": final_price,
-        "sent_at": datetime.utcnow(),
+        "sent_at": datetime.utcnow().isoformat(),
     }
+    if session:
+        session["messages"].append(accept_msg)
 
-    await col.update_one(
-        {"_id": ObjectId(negotiation_id)},
-        {
-            "$set": {"status": "accepted", "final_price": final_price, "updated_at": datetime.utcnow()},
-            "$push": {"messages": accept_msg},
-        },
-    )
+    # Broadcast acceptance before flushing
+    await _broadcast(negotiation_id, {
+        "type": "accepted",
+        "final_price": final_price,
+        "message": accept_msg,
+    })
 
-    # Notify the other party
+    await _flush_session(negotiation_id, "accepted", final_price)
+
+    # If no in-memory session, update DB directly (for REST-only flow)
+    if not session:
+        await col.update_one(
+            {"_id": ObjectId(negotiation_id)},
+            {
+                "$set": {"status": "accepted", "final_price": final_price, "updated_at": datetime.utcnow()},
+                "$push": {"messages": accept_msg},
+            },
+        )
+
+    # Notify other party
     other_id = neg["employer_id"] if role == "worker" else neg["worker_id"]
     try:
-        notif_col = Database.get_collection("notifications")
-        await notif_col.insert_one({
+        await _notif_col().insert_one({
             "user_id": other_id,
             "type": "negotiation_accepted",
             "title": "Negotiation Accepted!",
@@ -293,8 +314,7 @@ async def accept_negotiation(
     except Exception:
         pass
 
-    updated = await col.find_one({"_id": ObjectId(negotiation_id)})
-    return {"negotiation": _serialize(updated), "message": "Negotiation accepted", "final_price": final_price}
+    return {"message": "Negotiation accepted", "final_price": final_price}
 
 
 @router.post("/{negotiation_id}/reject")
@@ -303,7 +323,7 @@ async def reject_negotiation(
     access_token: Optional[str] = Cookie(None, alias=settings.COOKIE_NAME),
     authorization: Optional[str] = Header(None),
 ):
-    """Reject/close the negotiation."""
+    """Reject/close negotiation — flushes chat to DB."""
     user = await get_current_user(access_token, authorization)
     col = _col()
 
@@ -313,31 +333,21 @@ async def reject_negotiation(
 
     uid = user["user_id"]
     if uid != neg["worker_id"] and uid != neg["employer_id"]:
-        raise HTTPException(status_code=403, detail="You are not part of this negotiation")
+        raise HTTPException(status_code=403, detail="Not part of this negotiation")
 
-    role = "worker" if uid == neg["worker_id"] else "employer"
-    reject_msg = {
-        "sender_id": uid,
-        "sender_role": role,
-        "sender_name": user.get("full_name") or user.get("email", "").split("@")[0],
-        "message": "Negotiation closed",
-        "offer_amount": None,
-        "sent_at": datetime.utcnow(),
-    }
+    await _flush_session(negotiation_id, "rejected")
 
+    # If no in-memory session, update DB directly
     await col.update_one(
         {"_id": ObjectId(negotiation_id)},
-        {
-            "$set": {"status": "rejected", "updated_at": datetime.utcnow()},
-            "$push": {"messages": reject_msg},
-        },
+        {"$set": {"status": "rejected", "updated_at": datetime.utcnow()}},
     )
 
-    # Notify other party
+    # Notify
+    role = "worker" if uid == neg["worker_id"] else "employer"
     other_id = neg["employer_id"] if role == "worker" else neg["worker_id"]
     try:
-        notif_col = Database.get_collection("notifications")
-        await notif_col.insert_one({
+        await _notif_col().insert_one({
             "user_id": other_id,
             "type": "negotiation_rejected",
             "title": "Negotiation Closed",
@@ -363,10 +373,17 @@ async def get_negotiations_for_job(
     user = await get_current_user(access_token, authorization)
     col = _col()
 
-    cursor = col.find({"job_id": job_id, "employer_id": user["user_id"]}).sort("updated_at", -1)
+    cursor = col.find({
+        "job_id": job_id,
+        "$or": [{"employer_id": user["user_id"]}, {"worker_id": user["user_id"]}],
+    }).sort("updated_at", -1)
     negs = await cursor.to_list(length=50)
     for n in negs:
         n["_id"] = str(n["_id"])
+        # Include latest in-memory messages
+        nid = n["_id"]
+        if nid in active_sessions:
+            n["messages"] = active_sessions[nid]["messages"]
 
     return {"negotiations": negs, "count": len(negs)}
 
@@ -376,7 +393,7 @@ async def get_my_negotiations(
     access_token: Optional[str] = Cookie(None, alias=settings.COOKIE_NAME),
     authorization: Optional[str] = Header(None),
 ):
-    """Get all negotiations for the current user (worker or employer)."""
+    """All negotiations for the current user."""
     user = await get_current_user(access_token, authorization)
     col = _col()
     uid = user["user_id"]
@@ -388,5 +405,144 @@ async def get_my_negotiations(
     negs = await cursor.to_list(length=100)
     for n in negs:
         n["_id"] = str(n["_id"])
+        nid = n["_id"]
+        if nid in active_sessions:
+            n["messages"] = active_sessions[nid]["messages"]
 
     return {"negotiations": negs, "count": len(negs)}
+
+
+# ── WebSocket Endpoint ────────────────────────────────────────────────────
+
+@router.websocket("/ws/{negotiation_id}")
+async def negotiation_ws(ws: WebSocket, negotiation_id: str, token: str = ""):
+    """
+    Real-time negotiation chat.
+    Connect: ws://host/api/negotiations/ws/{negotiation_id}?token=<jwt>
+    
+    Client sends JSON:
+      { "type": "message", "message": "...", "offer_amount": 600 }
+    
+    Server broadcasts to all clients:
+      { "type": "message", "sender_id": "...", "sender_role": "worker|employer",
+        "sender_name": "...", "message": "...", "offer_amount": ..., "sent_at": "..." }
+    
+    On accept:  { "type": "accepted", "final_price": ... }
+    On close:   { "type": "session_ended", "status": "..." }
+    """
+    # Authenticate
+    user = await auth_from_token(token)
+    if not user:
+        await ws.close(code=4001, reason="Unauthorized")
+        return
+
+    uid = user["user_id"]
+
+    # Verify negotiation exists and user is a party
+    col = _col()
+    neg = await col.find_one({"_id": ObjectId(negotiation_id)})
+    if not neg:
+        await ws.close(code=4004, reason="Negotiation not found")
+        return
+
+    if uid != neg["worker_id"] and uid != neg["employer_id"]:
+        await ws.close(code=4003, reason="Not part of this negotiation")
+        return
+
+    role = "worker" if uid == neg["worker_id"] else "employer"
+    sender_name = user.get("full_name") or user.get("email", "").split("@")[0] or role.title()
+
+    # Ensure in-memory session exists
+    if negotiation_id not in active_sessions:
+        active_sessions[negotiation_id] = {
+            "messages": neg.get("messages", []),
+            "connections": {},
+            "meta": {
+                "worker_id": neg["worker_id"],
+                "employer_id": neg["employer_id"],
+                "original_price": neg["original_price"],
+            },
+        }
+
+    session = active_sessions[negotiation_id]
+
+    await ws.accept()
+    session["connections"][uid] = ws
+
+    # Send existing messages on connect
+    try:
+        await ws.send_json({
+            "type": "history",
+            "messages": session["messages"],
+            "status": neg.get("status", "active"),
+        })
+    except Exception:
+        pass
+
+    try:
+        while True:
+            data = await ws.receive_json()
+            msg_type = data.get("type", "message")
+
+            if msg_type == "message":
+                msg = {
+                    "sender_id": uid,
+                    "sender_role": role,
+                    "sender_name": sender_name,
+                    "message": data.get("message", ""),
+                    "offer_amount": data.get("offer_amount"),
+                    "sent_at": datetime.utcnow().isoformat(),
+                }
+                session["messages"].append(msg)
+
+                # Broadcast to all (including sender for confirmation)
+                await _broadcast(negotiation_id, {
+                    "type": "message",
+                    **msg,
+                })
+                # Also send to sender
+                try:
+                    await ws.send_json({"type": "message", **msg})
+                except Exception:
+                    pass
+
+            elif msg_type == "accept":
+                # Find final price
+                final_price = data.get("final_price")
+                if not final_price:
+                    for m in reversed(session["messages"]):
+                        if m.get("offer_amount"):
+                            final_price = m["offer_amount"]
+                            break
+                if not final_price:
+                    final_price = session["meta"]["original_price"]
+
+                accept_msg = {
+                    "sender_id": uid,
+                    "sender_role": role,
+                    "sender_name": sender_name,
+                    "message": f"Accepted the offer at ₹{final_price}/day",
+                    "offer_amount": final_price,
+                    "sent_at": datetime.utcnow().isoformat(),
+                }
+                session["messages"].append(accept_msg)
+                await _flush_session(negotiation_id, "accepted", final_price)
+                break
+
+            elif msg_type == "reject":
+                await _flush_session(negotiation_id, "rejected")
+                break
+
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        print(f"WS error: {e}")
+    finally:
+        # Remove this connection
+        if negotiation_id in active_sessions:
+            active_sessions[negotiation_id]["connections"].pop(uid, None)
+            # If no connections left, flush after a delay
+            if not active_sessions[negotiation_id]["connections"]:
+                # Don't flush immediately — the other party may reconnect
+                # Just leave messages in memory; they'll be flushed on accept/reject
+                pass

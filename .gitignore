@@ -56,3 +56,4 @@ worker2_cookies.json
 backend/app/uploads/
 *venv
 *dist
+*.pytest_cache
