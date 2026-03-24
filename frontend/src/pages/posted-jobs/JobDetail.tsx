@@ -148,7 +148,24 @@ const JobDetail: React.FC = () => {
             };
         };
 
-        const fetchApplicants = async () => {
+        // Handle deep linking from navigation state
+    useEffect(() => {
+        if (!isApplicantsLoading && applicants.length > 0 && location.state?.workerId) {
+            const workerId = location.state.workerId;
+            const target = applicants.find(a => a.id === workerId || a.applicationId === workerId);
+            if (target) {
+                // Slight delay to ensure UI is ready
+                const timer = setTimeout(() => {
+                    openNegotiationChat(target);
+                    // Clear state
+                    window.history.replaceState({}, document.title);
+                }, 300);
+                return () => clearTimeout(timer);
+            }
+        }
+    }, [isApplicantsLoading, applicants, location.state]);
+
+    const fetchApplicants = async () => {
             setIsApplicantsLoading(true);
             setApplicantsError('');
             try {

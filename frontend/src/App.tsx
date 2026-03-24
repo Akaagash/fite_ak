@@ -39,8 +39,8 @@ const App: React.FC = () => {
     <Router>
       <ThemeProvider>
         <ModeProvider>
-          <NotificationProvider>
-            <AuthProvider>
+          <AuthProvider>
+            <NotificationProvider>
               <Routes>
                 {/* Public route - Login/Signup */}
                 <Route path="/login" element={<LoginSignup />} />
@@ -63,8 +63,8 @@ const App: React.FC = () => {
                   <Route path="settings" element={<UserSettings />} />
                 </Route>
               </Routes>
-            </AuthProvider>
-          </NotificationProvider>
+            </NotificationProvider>
+          </AuthProvider>
         </ModeProvider>
       </ThemeProvider>
     </Router>

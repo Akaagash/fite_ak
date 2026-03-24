@@ -148,14 +148,13 @@ async def start_negotiation(
     })
     if existing:
         neg_id = str(existing["_id"])
-        # Re-create in-memory session if not present
         if neg_id not in active_sessions:
             active_sessions[neg_id] = {
                 "messages": existing.get("messages", []),
                 "connections": {},
                 "meta": {
-                    "worker_id": existing["worker_id"],
-                    "employer_id": existing["employer_id"],
+                    "worker_id": str(existing["worker_id"]),
+                    "employer_id": str(existing["employer_id"]),
                     "original_price": existing["original_price"],
                 },
             }
@@ -188,13 +187,12 @@ async def start_negotiation(
     neg_id = str(result.inserted_id)
     doc["_id"] = neg_id
 
-    # Create in-memory session
     active_sessions[neg_id] = {
         "messages": [first_msg],
         "connections": {},
         "meta": {
-            "worker_id": user["user_id"],
-            "employer_id": body.employer_id,
+            "worker_id": str(user["user_id"]),
+            "employer_id": str(body.employer_id),
             "original_price": body.original_price,
         },
     }
@@ -260,7 +258,7 @@ async def start_negotiation(
             "read": False,
             "created_at": datetime.utcnow(),
         })
-        await NotificationManager.send_personal_message(body.employer_id, {
+        await NotificationManager.send_personal_message(str(body.employer_id), {
             "type": "personal_notification",
             "data": notif
         })
@@ -372,9 +370,28 @@ async def accept_negotiation(
             "read": False,
             "created_at": datetime.utcnow(),
         })
-        await NotificationManager.send_personal_message(other_id, notif)
+        await NotificationManager.send_personal_message(str(other_id), notif)
     except Exception:
         pass
+
+    # ── Auto-Application Sync ──
+    try:
+        app_col = Database.get_collection("applications")
+        await app_col.update_one(
+            {
+                "job_id": neg["job_id"],
+                "$or": [{"worker_id": neg["worker_id"]}, {"applicant_id": neg["worker_id"]}]
+            },
+            {
+                "$set": {
+                    "status": "accepted",
+                    "daily_meta.final_agreed_price": final_price,
+                    "updated_at": datetime.utcnow()
+                }
+            }
+        )
+    except Exception as e:
+        print(f"Error updating application status on accept: {e}")
 
     return {"message": "Negotiation accepted", "final_price": final_price}
 
@@ -510,17 +527,17 @@ async def send_fallback_message(
     }
 
     # ALSO Notify other party via global notification
-    other_id = neg["employer_id"] if role == "worker" else neg["worker_id"]
+    other_id = str(neg["employer_id"] if role == "worker" else neg["worker_id"])
     try:
         await NotificationManager.send_personal_message(other_id, {
             "type": "personal_notification",
             "data": {
                 "type": "negotiation_message",
-                "title": f"New message from {sender_name}",
-                "message": msg["message"] or "(Price Update)",
+                "title": f"DM from {sender_name}",
+                "message": msg["message"] or f"Sent a price proposal: ₹{msg['offer_amount']}",
                 "negotiation_id": negotiation_id,
                 "job_id": neg["job_id"],
-                "worker_id": neg["worker_id"],
+                "worker_id": str(neg["worker_id"]),
             }
         })
     except Exception:
@@ -621,17 +638,17 @@ async def negotiation_ws(ws: WebSocket, negotiation_id: str, token: str = ""):
                 })
 
                 # ALSO send a global personal notification to the OTHER party
-                other_id = session["meta"]["employer_id"] if role == "worker" else session["meta"]["worker_id"]
+                other_id = str(session["meta"]["employer_id"] if role == "worker" else session["meta"]["worker_id"])
                 try:
                     await NotificationManager.send_personal_message(other_id, {
                         "type": "personal_notification",
                         "data": {
                             "type": "negotiation_message",
-                            "title": f"New message from {sender_name}",
-                            "message": data.get("message", "(Offer/Price Update)") if not data.get("message") else data.get("message"),
+                            "title": f"DM from {sender_name}",
+                            "message": data.get("message") or f"Sent a price proposal: ₹{data.get('offer_amount')}",
                             "negotiation_id": negotiation_id,
-                            "job_id": neg.get("job_id"),
-                            "worker_id": session["meta"]["worker_id"],
+                            "job_id": str(neg.get("job_id")),
+                            "worker_id": str(session["meta"]["worker_id"]),
                         }
                     })
                 except Exception:
@@ -658,6 +675,25 @@ async def negotiation_ws(ws: WebSocket, negotiation_id: str, token: str = ""):
                 }
                 session["messages"].append(accept_msg)
                 await _flush_session(negotiation_id, "accepted", final_price)
+                
+                # ── Auto-Application Sync in WS ──
+                try:
+                    app_col_ws = Database.get_collection("applications")
+                    await app_col_ws.update_one(
+                        {
+                            "job_id": str(neg["job_id"]),
+                            "$or": [{"worker_id": str(neg["worker_id"])}, {"applicant_id": str(neg["worker_id"])}]
+                        },
+                        {
+                            "$set": {
+                                "status": "accepted",
+                                "daily_meta.final_agreed_price": final_price,
+                                "updated_at": datetime.utcnow()
+                            }
+                        }
+                    )
+                except Exception as e:
+                    print(f"Error updating application status in WS accept: {e}")
                 break
 
             elif msg_type == "reject":

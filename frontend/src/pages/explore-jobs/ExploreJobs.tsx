@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import React, { useEffect, useState, useCallback, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 import { useMode } from '../../context/ModeContext';
 import { useAuth } from '../../context/AuthContext';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -58,6 +58,7 @@ interface LongTermJob {
 const ExploreJobs: React.FC = () => {
     const { mode } = useMode();
     const navigate = useNavigate();
+    const location = useLocation();
     const auth = useAuth();
     const authRef = useRef(auth);
     authRef.current = auth;
@@ -315,6 +316,23 @@ const ExploreJobs: React.FC = () => {
         setShowNegotiationModal(false);
         setShowFilters(false);
     }, [mode]);
+
+    // Handle deep linking from notification state
+    useEffect(() => {
+        if (dailyJobs.length > 0 && location.state?.openJobId && !showNegotiationModal) {
+            const jobId = location.state.openJobId;
+            const target = dailyJobs.find(j => j.id === jobId);
+            if (target) {
+                // Slight delay to ensure UI is ready
+                const timer = setTimeout(() => {
+                    handleNegotiateClick(target);
+                    // Clear state
+                    window.history.replaceState({}, document.title);
+                }, 500);
+                return () => clearTimeout(timer);
+            }
+        }
+    }, [dailyJobs, location.state, showNegotiationModal]);
 
     useEffect(() => {
         if (isExploring) {

@@ -1,7 +1,8 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { X, Bell } from 'lucide-react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
+import { useAuth } from './AuthContext';
 
 interface NotificationMessage {
     id: string;
@@ -23,6 +24,7 @@ export const useNotifications = () => useContext(NotificationContext);
 export const NotificationProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
     const [notifications, setNotifications] = useState<NotificationMessage[]>([]);
     const navigate = useNavigate();
+    const { user } = useAuth();
 
     useEffect(() => {
         const token = localStorage.getItem('token');
@@ -74,7 +76,15 @@ export const NotificationProvider: React.FC<{ children: React.ReactNode }> = ({ 
 
     const handleNotificationClick = (notif: NotificationMessage) => {
         if ((notif.type === 'negotiation_started' || notif.type === 'negotiation_message') && notif.job_id) {
-            navigate('/posted-jobs', { state: { openJobId: notif.job_id, workerId: notif.worker_id } });
+            // Role-based navigation
+            const isEmployer = user?.role === 'employer' || (notif.type === 'negotiation_started');
+            
+            if (isEmployer) {
+                navigate('/posted-jobs', { state: { openJobId: notif.job_id, workerId: notif.worker_id } });
+            } else {
+                // Workers go to explore-jobs to see the negotiation modal
+                navigate('/explore-jobs', { state: { openJobId: notif.job_id } });
+            }
         }
         removeNotification(notif.id);
     };
