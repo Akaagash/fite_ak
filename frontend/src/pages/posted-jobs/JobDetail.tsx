@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams, useLocation } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ChevronLeft, MapPin, Clock, Star, MessageCircle, ArrowLeft, MoreVertical, X, Send, Phone, User as UserIcon, Calendar, CheckCircle, Navigation, Users, Check, Briefcase } from 'lucide-react';
+import { ChevronLeft, MapPin, Clock, Star, MessageCircle, Phone, Calendar, Navigation, Users, Check, Briefcase } from 'lucide-react';
 import { useMode } from '../../context/ModeContext';
 // Removed useAuth
 
@@ -147,23 +147,6 @@ const JobDetail: React.FC = () => {
                 negotiatedPrice: app.negotiated_price,
             };
         };
-
-        // Handle deep linking from navigation state
-    useEffect(() => {
-        if (!isApplicantsLoading && applicants.length > 0 && location.state?.workerId) {
-            const workerId = location.state.workerId;
-            const target = applicants.find(a => a.id === workerId || a.applicationId === workerId);
-            if (target) {
-                // Slight delay to ensure UI is ready
-                const timer = setTimeout(() => {
-                    openNegotiationChat(target);
-                    // Clear state
-                    window.history.replaceState({}, document.title);
-                }, 300);
-                return () => clearTimeout(timer);
-            }
-        }
-    }, [isApplicantsLoading, applicants, location.state]);
 
     const fetchApplicants = async () => {
             setIsApplicantsLoading(true);
