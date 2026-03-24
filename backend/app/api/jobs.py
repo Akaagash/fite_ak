@@ -86,13 +86,14 @@ async def get_jobs(
     category: Optional[str] = None,
     status: str = "open",
     skip: int = 0,
-    limit: int = 20
+    limit: int = 20,
+    employer_id: Optional[str] = None
 ):
     """
     Get list of jobs with optional filters
     Public endpoint - no authentication required
     """
-    jobs = await JobService.get_jobs(job_type, category, status, skip, limit)
+    jobs = await JobService.get_jobs(job_type, category, status, skip, limit, employer_id)
     
     return {
         "jobs": jobs,

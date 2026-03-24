@@ -362,6 +362,7 @@ const ExploreJobs: React.FC = () => {
         setNegotiationId(null);
         setIsSendingMessage(false);
         setShowNegotiationModal(true);
+        setSelectedJob(null); // Close the detail modal
         
         // Try to fetch existing active negotiation
         try {
@@ -379,7 +380,7 @@ const ExploreJobs: React.FC = () => {
 
     const connectWebSocket = (negId: string) => {
         if (wsRef.current) wsRef.current.close();
-        const token = document.cookie.split('; ').find(c => c.startsWith('access_token='))?.split('=')[1] || '';
+        const token = localStorage.getItem('token') || '';
         const ws = new WebSocket(`${WS_BASE}/api/negotiations/ws/${negId}?token=${token}`);
         
         ws.onmessage = (event) => {

@@ -32,37 +32,40 @@ import JobResponses from './pages/job-responses/JobResponses';
 import { ModeProvider } from './context/ModeContext';
 import { ThemeProvider } from './context/ThemeContext';
 import { AuthProvider } from './context/AuthContext';
+import { NotificationProvider } from './context/NotificationContext';
 
 const App: React.FC = () => {
   return (
     <ThemeProvider>
       <ModeProvider>
-        <AuthProvider>
-          <Router>
-            <Routes>
-              {/* Public route - Login/Signup */}
-              <Route path="/login" element={<LoginSignup />} />
-              
-              {/* Default route - Redirect to login */}
-              <Route path="/" element={<Navigate to="/login" replace />} />
-              
-              {/* Protected routes - Require authentication */}
-              <Route path="/" element={<ProtectedRoute><Layout /></ProtectedRoute>}>
-                <Route path="home" element={<Home />} />
-                <Route path="posted-jobs" element={<PostedJobs />} />
-                <Route path="job-detail/:mode/:jobId" element={<JobDetail />} />
-                <Route path="applicants/:mode/:jobId" element={<Applicants />} />
-                <Route path="job-responses/:mode/:jobId" element={<JobResponses />} />
-                <Route path="post-daily-job" element={<PostDailyJob />} />
-                <Route path="post-long-term-job" element={<PostLongTermJob />} />
-                <Route path="applied-jobs" element={<AppliedJobs />} />
-                <Route path="apply/:jobId" element={<ApplyJob />} />
-                <Route path="explore-jobs" element={<ExploreJobs />} />
-                <Route path="settings" element={<UserSettings />} />
-              </Route>
-            </Routes>
-          </Router>
-        </AuthProvider>
+        <NotificationProvider>
+          <AuthProvider>
+            <Router>
+              <Routes>
+                {/* Public route - Login/Signup */}
+                <Route path="/login" element={<LoginSignup />} />
+                
+                {/* Default route - Redirect to login */}
+                <Route path="/" element={<Navigate to="/login" replace />} />
+                
+                {/* Protected routes - Require authentication */}
+                <Route path="/" element={<ProtectedRoute><Layout /></ProtectedRoute>}>
+                  <Route path="home" element={<Home />} />
+                  <Route path="posted-jobs" element={<PostedJobs />} />
+                  <Route path="job-detail/:mode/:jobId" element={<JobDetail />} />
+                  <Route path="applicants/:mode/:jobId" element={<Applicants />} />
+                  <Route path="job-responses/:mode/:jobId" element={<JobResponses />} />
+                  <Route path="post-daily-job" element={<PostDailyJob />} />
+                  <Route path="post-long-term-job" element={<PostLongTermJob />} />
+                  <Route path="applied-jobs" element={<AppliedJobs />} />
+                  <Route path="apply/:jobId" element={<ApplyJob />} />
+                  <Route path="explore-jobs" element={<ExploreJobs />} />
+                  <Route path="settings" element={<UserSettings />} />
+                </Route>
+              </Routes>
+            </Router>
+          </AuthProvider>
+        </NotificationProvider>
       </ModeProvider>
     </ThemeProvider>
   );

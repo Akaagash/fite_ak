@@ -13,6 +13,7 @@ from app.api import auth, jobs
 from app.api import applications
 from app.api import rating
 from app.api import negotiation
+from app.api import notifications
 
 
 @asynccontextmanager
@@ -77,6 +78,9 @@ app.include_router(rating.router)
 
 # Include negotiation routes
 app.include_router(negotiation.router)
+
+# Include notification routes
+app.include_router(notifications.router)
 
 
 @app.get("/")

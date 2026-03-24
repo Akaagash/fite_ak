@@ -223,10 +223,7 @@ const JobDetail: React.FC = () => {
             wsRef.current = null;
         }
 
-        const token = document.cookie
-            .split('; ')
-            .find(c => c.startsWith('access_token='))
-            ?.split('=')[1] || '';
+        const token = localStorage.getItem('token') || '';
 
         const ws = new WebSocket(`${WS_BASE}/api/negotiations/ws/${negId}?token=${token}`);
 
@@ -626,7 +623,7 @@ const JobDetail: React.FC = () => {
                         onClose={closeNegotiationChat}
                         jobTitle={`${selectedWorker.name} · ${jobData.title}`}
                         messages={negotiationMessages}
-                        status={negotiationStatus as any}
+                        status={(selectedWorker.status === 'accepted' || selectedWorker.status === 'completed' || negotiationStatus === 'accepted') ? 'accepted' : (negotiationStatus as any)}
                         isEmployer={true}
                         onSendMessage={handleSendNegotiationMessage}
                         onAccept={(_price) => {
