@@ -574,37 +574,8 @@ const AppliedJobs: React.FC = () => {
                                 </div>
 
                                 {(normalizedStatus(selectedApplication.status) === 'pending' || normalizedStatus(selectedApplication.status) === 'negotiating' || normalizedStatus(selectedApplication.status) === 'applied') && (
-                                    <div className="p-5 border-t border-neutral-200 space-y-3">
-                                        {isDaily && (
-                                            <div className="flex items-center gap-2">
-                                                <span className="text-sm text-neutral-600">Your Offer</span>
-                                                <div className="flex items-center gap-1 px-3 py-2 rounded-lg border border-neutral-300 bg-white">
-                                                    <IndianRupee size={14} className="text-neutral-600" />
-                                                    <input
-                                                        type="number"
-                                                        value={offerAmount}
-                                                        onChange={(e) => setOfferAmount(e.target.value)}
-                                                        className="w-24 outline-none text-sm bg-transparent text-neutral-900 placeholder:text-neutral-400 caret-neutral-900"
-                                                    />
-                                                </div>
-                                            </div>
-                                        )}
-                                        <div className="flex gap-2">
-                                            <input
-                                                type="text"
-                                                value={chatMessage}
-                                                onChange={(e) => setChatMessage(e.target.value)}
-                                                placeholder="Type your message to poster..."
-                                                className="flex-1 px-3 py-2 rounded-lg border border-neutral-300 bg-white text-sm text-neutral-900 placeholder:text-neutral-400 caret-neutral-900"
-                                            />
-                                            <button
-                                                onClick={handleSendMessage}
-                                                disabled={isSendingMessage || !chatMessage.trim()}
-                                                className="px-4 py-2 rounded-lg bg-neutral-900 text-white disabled:opacity-50"
-                                            >
-                                                <Send size={14} />
-                                            </button>
-                                        </div>
+                                    <div className="p-3 bg-neutral-50 border-t border-neutral-200 text-center text-xs text-neutral-500 rounded-b-2xl">
+                                        Negotiation is read-only here. Please use Explore Jobs to negotiate before assignment.
                                     </div>
                                 )}
 

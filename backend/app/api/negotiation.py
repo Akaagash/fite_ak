@@ -11,6 +11,7 @@ from bson import ObjectId
 from app.core.database import Database
 from app.services.auth_service import AuthService
 from app.core.config import settings
+from app.api.notifications import NotificationManager
 import json
 import asyncio
 
@@ -196,16 +197,20 @@ async def start_negotiation(
 
     # Notify employer
     try:
-        await _notif_col().insert_one({
-            "user_id": body.employer_id,
+        notif = {
             "type": "negotiation_started",
             "title": "New Price Negotiation",
             "message": f"{doc['worker_name']} wants to negotiate the price for your job",
             "negotiation_id": neg_id,
             "job_id": body.job_id,
+        }
+        await _notif_col().insert_one({
+            "user_id": body.employer_id,
+            **notif,
             "read": False,
             "created_at": datetime.utcnow(),
         })
+        await NotificationManager.send_personal_message(body.employer_id, notif)
     except Exception:
         pass
 
@@ -301,16 +306,20 @@ async def accept_negotiation(
     # Notify other party
     other_id = neg["employer_id"] if role == "worker" else neg["worker_id"]
     try:
-        await _notif_col().insert_one({
-            "user_id": other_id,
+        notif = {
             "type": "negotiation_accepted",
             "title": "Negotiation Accepted!",
             "message": f"Price agreed at ₹{final_price}/day",
             "negotiation_id": negotiation_id,
             "job_id": neg["job_id"],
+        }
+        await _notif_col().insert_one({
+            "user_id": other_id,
+            **notif,
             "read": False,
             "created_at": datetime.utcnow(),
         })
+        await NotificationManager.send_personal_message(other_id, notif)
     except Exception:
         pass
 
@@ -347,16 +356,20 @@ async def reject_negotiation(
     role = "worker" if uid == neg["worker_id"] else "employer"
     other_id = neg["employer_id"] if role == "worker" else neg["worker_id"]
     try:
-        await _notif_col().insert_one({
-            "user_id": other_id,
+        notif = {
             "type": "negotiation_rejected",
             "title": "Negotiation Closed",
             "message": "The negotiation has been closed",
             "negotiation_id": negotiation_id,
             "job_id": neg["job_id"],
+        }
+        await _notif_col().insert_one({
+            "user_id": other_id,
+            **notif,
             "read": False,
             "created_at": datetime.utcnow(),
         })
+        await NotificationManager.send_personal_message(other_id, notif)
     except Exception:
         pass
 

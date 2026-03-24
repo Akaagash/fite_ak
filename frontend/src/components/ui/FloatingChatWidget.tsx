@@ -197,26 +197,26 @@ const FloatingChatWidget: React.FC<FloatingChatWidgetProps> = ({
             {status === 'active' && (
                 <div className="p-3 bg-white border-t border-neutral-200 shrink-0">
                     {/* Price Altering Bar */}
-                    <div className="flex items-center gap-2 mb-3">
-                        <div className="relative flex-1">
-                            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-neutral-500">₹</span>
+                    <div className="flex items-center gap-3 mb-3">
+                        <button 
+                            onClick={() => setOfferPrice(String(Math.max(0, (parseInt(offerPrice || String(latestPrice || 0)) - 50))))}
+                            className="flex-1 py-3 bg-neutral-100 hover:bg-neutral-200 rounded-xl text-neutral-800 text-base font-extrabold transition-all border-2 border-neutral-200 active:scale-95"
+                        >
+                            -₹50
+                        </button>
+                        <div className="relative flex-[1.5]">
+                            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-neutral-500 font-bold">₹</span>
                             <input
                                 type="number"
                                 value={offerPrice}
                                 onChange={(e) => setOfferPrice(e.target.value)}
-                                placeholder="Propose a different price..."
-                                className="w-full pl-8 pr-3 py-2 bg-neutral-100 rounded-lg text-sm font-bold focus:outline-none focus:ring-2 ring-indigo-500"
+                                placeholder="Custom"
+                                className="w-full pl-7 pr-3 py-3 bg-neutral-100 border-2 border-neutral-200 rounded-xl text-sm font-black text-neutral-900 focus:outline-none focus:ring-2 ring-indigo-500 focus:border-indigo-500 text-center"
                             />
                         </div>
                         <button 
-                            onClick={() => setOfferPrice(String(Math.max(0, (parseInt(offerPrice || String(latestPrice || 0)) - 50))))}
-                            className="p-2 bg-neutral-100 hover:bg-neutral-200 rounded-lg text-neutral-700 font-bold transition-colors"
-                        >
-                            -₹50
-                        </button>
-                        <button 
                             onClick={() => setOfferPrice(String((parseInt(offerPrice || String(latestPrice || 0)) + 50)))}
-                            className="p-2 bg-neutral-100 hover:bg-neutral-200 rounded-lg text-neutral-700 font-bold transition-colors"
+                            className="flex-1 py-3 bg-neutral-100 hover:bg-neutral-200 rounded-xl text-neutral-800 text-base font-extrabold transition-all border-2 border-neutral-200 active:scale-95"
                         >
                             +₹50
                         </button>
@@ -230,14 +230,14 @@ const FloatingChatWidget: React.FC<FloatingChatWidgetProps> = ({
                             onChange={(e) => setMessageInput(e.target.value)}
                             onKeyDown={(e) => e.key === 'Enter' && handleSend()}
                             placeholder={waitingForEmployer ? "Employer hasn't joined yet..." : "Type your message..."}
-                            className="flex-1 px-4 py-2 bg-neutral-100 rounded-full text-sm focus:outline-none focus:ring-2 ring-indigo-500"
+                            className="flex-1 px-4 py-3 bg-neutral-100 rounded-xl text-sm text-neutral-900 font-medium focus:outline-none focus:ring-2 ring-indigo-500 placeholder:text-neutral-500"
                         />
                         <button
                             onClick={handleSend}
                             disabled={!messageInput.trim() && !offerPrice}
-                            className="p-2 bg-indigo-600 text-white rounded-full hover:bg-indigo-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed shrink-0 w-10 h-10 flex items-center justify-center shadow-md"
+                            className="p-3 bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed shrink-0 w-12 h-12 flex items-center justify-center shadow-md active:scale-95"
                         >
-                            <Send size={16} className="-ml-1" />
+                            <Send size={18} className="-ml-1" />
                         </button>
                     </div>
 

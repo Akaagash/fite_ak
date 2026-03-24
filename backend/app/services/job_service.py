@@ -88,7 +88,8 @@ class JobService:
         category: Optional[str] = None,
         status: str = "open",
         skip: int = 0,
-        limit: int = 20
+        limit: int = 20,
+        employer_id: Optional[str] = None
     ) -> List[Dict]:
         """
         Get list of jobs with filters
@@ -99,6 +100,7 @@ class JobService:
             status: Filter by status (default: open)
             skip: Number of records to skip
             limit: Maximum records to return
+            employer_id: Filter by employer ID
             
         Returns:
             List of jobs
@@ -114,6 +116,8 @@ class JobService:
                 query["category"] = category
             if status:
                 query["status"] = status
+            if employer_id:
+                query["employer_id"] = employer_id
             
             # Fetch jobs
             cursor = jobs_collection.find(query).sort("created_at", -1).skip(skip).limit(limit)
