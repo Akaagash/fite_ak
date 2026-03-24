@@ -1,11 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { useMode } from '../../context/ModeContext';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { LayoutGrid, List, Plus, MapPin, Clock, IndianRupee, Users, X, ChevronDown, Search, Briefcase, FileText, Check, Loader2 } from 'lucide-react';
 import TextType from '../../components/ui/TextType';
 import { useAuth } from '../../context/AuthContext';
-const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8010';
+const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
 
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -649,6 +649,7 @@ const statusBadgeClass = (status: string) => {
 const PostedJobs: React.FC = () => {
     const { mode } = useMode();
     const navigate = useNavigate();
+    const location = useLocation();
     const [viewMode, setViewMode] = useState<'card' | 'list'>('card');
     const [searchQuery, setSearchQuery] = useState('');
     const [categoryFilter, setCategoryFilter] = useState('all');
@@ -663,6 +664,22 @@ const PostedJobs: React.FC = () => {
     
     const isDaily = mode === 'daily';
 
+    // Handle deep linking from notification state
+    useEffect(() => {
+        if (!isLoading && location.state?.openJobId) {
+            const openJobId = location.state.openJobId;
+            const workerId = location.state.workerId;
+            
+            // Wait slightly for components to settle
+            const timer = setTimeout(() => {
+                handleJobClick(openJobId, workerId);
+                // Clear state so it doesn't re-open on every re-render
+                window.history.replaceState({}, document.title);
+            }, 500);
+            return () => clearTimeout(timer);
+        }
+    }, [isLoading, location.state]);
+
     useEffect(() => {
         setSearchQuery('');
         setCategoryFilter('all');
@@ -673,7 +690,7 @@ const PostedJobs: React.FC = () => {
         setIsLoading(true);
         setFetchError('');
         try {
-            const userId = auth?.user?.id;
+            const userId = auth?.user?.user_id;
             const queryParams = userId ? `&employer_id=${userId}` : '';
             const statuses = ['open', 'ongoing', 'completed'];
             const statusResponses = await Promise.all(
@@ -740,11 +757,11 @@ const PostedJobs: React.FC = () => {
             return true;
         });
 
-    const handleJobClick = (jobId: number) => {
+    const handleJobClick = (jobId: string | number, workerId?: string) => {
         if (isDaily) {
-            navigate(`/job-detail/${mode}/${jobId}`);
+            navigate(`/job-detail/${mode}/${jobId}`, { state: { workerId } });
         } else {
-            navigate(`/applicants/${mode}/${jobId}`);
+            navigate(`/applicants/${mode}/${jobId}`, { state: { workerId } });
         }
     };
 

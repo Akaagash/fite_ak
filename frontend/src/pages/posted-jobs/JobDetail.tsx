@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useNavigate, useParams, useLocation } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ChevronLeft, MapPin, Clock, Star, MessageCircle, ArrowLeft, MoreVertical, X, Send, Phone, User as UserIcon, Calendar, CheckCircle, Navigation, Users, Check, Briefcase } from 'lucide-react';
 import { useMode } from '../../context/ModeContext';
@@ -53,6 +53,7 @@ const JobDetail: React.FC = () => {
     const { mode, jobId } = useParams();
     const { mode: contextMode } = useMode();
     const navigate = useNavigate();
+    const location = useLocation();
     const [selectedWorker, setSelectedWorker] = useState<Worker | null>(null);
     const [job, setJob] = useState<any>(null);
     const [isLoading, setIsLoading] = useState(true);
@@ -72,6 +73,11 @@ const JobDetail: React.FC = () => {
 
     const isDaily = mode === 'daily' || contextMode === 'daily';
 
+    const authHeaders = () => {
+        const token = localStorage.getItem('token') || '';
+        return { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+    };
+
     // Auto-scroll chat
     useEffect(() => {
         chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -82,7 +88,7 @@ const JobDetail: React.FC = () => {
         if (!jobId) return;
         const fetchJob = async () => {
             try {
-                const res = await fetch(`${API_BASE}/api/jobs/${jobId}`, { credentials: 'include' });
+                const res = await fetch(`${API_BASE}/api/jobs/${jobId}`, { headers: authHeaders() });
                 if (!res.ok) throw new Error('Job not found');
                 const data = await res.json();
                 setJob(data.job);
@@ -146,7 +152,7 @@ const JobDetail: React.FC = () => {
             setIsApplicantsLoading(true);
             setApplicantsError('');
             try {
-                const res = await fetch(`${API_BASE}/api/jobs/${jobId}/applicants`, { credentials: 'include' });
+                const res = await fetch(`${API_BASE}/api/jobs/${jobId}/applicants`, { headers: authHeaders() });
                 if (!res.ok) throw new Error('Failed to load applicants');
                 const data = await res.json();
                 setApplicants((data.applicants || []).map(toWorker));
@@ -160,6 +166,23 @@ const JobDetail: React.FC = () => {
         fetchApplicants();
     }, [jobId, isDaily]);
 
+    // Handle auto-open transition from notification deep-link
+    useEffect(() => {
+        if (!isApplicantsLoading && applicants.length > 0 && location.state?.workerId) {
+            const targetWorkerId = location.state.workerId;
+            const targetWorker = applicants.find(w => w.id === targetWorkerId);
+            if (targetWorker) {
+                // Delay slightly to ensure UI is ready
+                const timer = setTimeout(() => {
+                    openNegotiationChat(targetWorker);
+                    // Clear state to prevent re-opening
+                    window.history.replaceState({}, document.title);
+                }, 500);
+                return () => clearTimeout(timer);
+            }
+        }
+    }, [isApplicantsLoading, applicants, location.state]);
+
     const patchWorkerLocal = (applicationId: string, update: Partial<Worker>) => {
         setApplicants(prev => prev.map(w => w.applicationId === applicationId ? { ...w, ...update } : w));
         setSelectedWorker(prev => prev && prev.applicationId === applicationId ? { ...prev, ...update } : prev);
@@ -172,8 +195,7 @@ const JobDetail: React.FC = () => {
         try {
             const res = await fetch(`${API_BASE}/api/jobs/${jobId}/applicants/${appId}/status`, {
                 method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
-                credentials: 'include',
+                headers: authHeaders(),
                 body: JSON.stringify({ status: newStatus }),
             });
             if (!res.ok) throw new Error('Failed to update applicant status');
@@ -195,15 +217,16 @@ const JobDetail: React.FC = () => {
 
         // Check if there's an existing negotiation for this job/worker
         try {
-            const res = await fetch(`${API_BASE}/api/negotiations/job/${jobId}`, { credentials: 'include' });
+            const res = await fetch(`${API_BASE}/api/negotiations/job/${jobId}`, { headers: authHeaders() });
             if (res.ok) {
                 const data = await res.json();
+                // Look for any active negotiation with this worker
                 const existingNeg = (data.negotiations || []).find(
-                    (n: any) => n.worker_id === worker.id && n.status === 'active'
+                    (n: any) => n.worker_id === worker.id && (n.status === 'active' || n.status === 'waiting_employer' || n.status === 'waiting_worker')
                 );
                 if (existingNeg) {
                     setNegotiationId(existingNeg._id);
-                    setNegotiationMessages(existingNeg.messages || []);
+                    setNegotiationMessages((existingNeg.messages || []).map(mapWsMessageLocal));
                     setNegotiationStatus(existingNeg.status || 'active');
                     connectWebSocket(existingNeg._id);
                     return;
@@ -211,8 +234,7 @@ const JobDetail: React.FC = () => {
             }
         } catch { /* ignore */ }
 
-        // No existing active negotiation — just open the chat and wait
-        // (Worker initiates from ExploreJobs side)
+        // No existing negotiation yet — show waiting state, poll for it
         setNegotiationId(null);
     };
 
@@ -242,26 +264,33 @@ const JobDetail: React.FC = () => {
         });
 
         ws.onmessage = (event) => {
-            const data = JSON.parse(event.data);
+            try {
+                const data = JSON.parse(event.data);
 
-            if (data.type === 'history') {
-                setNegotiationMessages((data.messages || []).map(mapWsMessage));
-                setNegotiationStatus(data.status || 'active');
-            } else if (data.type === 'message') {
-                setNegotiationMessages(prev => {
-                    const mapped = mapWsMessage(data);
-                    if (prev.some(m => m.id === mapped.id)) return prev;
-                    return [...prev, mapped];
-                });
-            } else if (data.type === 'accepted') {
-                setNegotiationStatus('accepted');
-            } else if (data.type === 'session_ended') {
-                setNegotiationStatus(data.status || 'closed');
+                if (data.type === 'history') {
+                    setNegotiationMessages((data.messages || []).map(mapWsMessage));
+                    setNegotiationStatus(data.status || 'active');
+                } else if (data.type === 'message') {
+                    setNegotiationMessages(prev => {
+                        const mapped = mapWsMessage(data);
+                        const key = mapped.id;
+                        if (prev.some(m => m.id === key)) return prev;
+                        return [...prev, mapped];
+                    });
+                } else if (data.type === 'accepted') {
+                    setNegotiationStatus('accepted');
+                } else if (data.type === 'session_ended') {
+                    setNegotiationStatus(data.status || 'closed');
+                }
+            } catch (e) {
+                console.error('WS parse error', e);
             }
         };
 
+        ws.onerror = (err) => console.error('WS error', err);
+
         ws.onclose = () => {
-            console.log('Negotiation WS closed');
+            console.log('Negotiation WS closed (employer)');
         };
 
         wsRef.current = ws;
@@ -274,22 +303,24 @@ const JobDetail: React.FC = () => {
 
         const poll = async () => {
             try {
-                const res = await fetch(`${API_BASE}/api/negotiations/job/${jobId}`, { credentials: 'include' });
+                const res = await fetch(`${API_BASE}/api/negotiations/job/${jobId}`, { headers: authHeaders() });
                 if (!res.ok || !active) return;
                 const data = await res.json();
                 const neg = (data.negotiations || []).find(
-                    (n: any) => n.worker_id === selectedWorker.id && n.status === 'active'
+                    (n: any) => n.worker_id === selectedWorker.id &&
+                    (n.status === 'active' || n.status === 'waiting_employer' || n.status === 'waiting_worker')
                 );
                 if (neg && active) {
                     setNegotiationId(neg._id);
                     setNegotiationMessages((neg.messages || []).map(mapWsMessageLocal));
+                    setNegotiationStatus(neg.status || 'active');
                     connectWebSocket(neg._id);
                 }
             } catch { /* ignore */ }
         };
 
         poll();
-        const timer = setInterval(poll, 3000);
+        const timer = setInterval(poll, 2000); // poll every 2s for responsiveness
         return () => { active = false; clearInterval(timer); };
     }, [showNegotiationChat, negotiationId, selectedWorker, jobId]);
 
@@ -332,13 +363,12 @@ const JobDetail: React.FC = () => {
         try {
             const res = await fetch(`${API_BASE}/api/negotiations/${negotiationId}/message`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                credentials: 'include',
+                headers: authHeaders(),
                 body: JSON.stringify({ message, offer_amount: offerAmount }),
             });
             if (!res.ok) throw new Error('Failed to send');
             // Re-fetch messages
-            const getRes = await fetch(`${API_BASE}/api/negotiations/${negotiationId}`, { credentials: 'include' });
+            const getRes = await fetch(`${API_BASE}/api/negotiations/${negotiationId}`, { headers: authHeaders() });
             if (getRes.ok) {
                 const data = await getRes.json();
                 setNegotiationMessages((data.negotiation.messages || []).map(mapWsMessageLocal));
@@ -353,8 +383,8 @@ const JobDetail: React.FC = () => {
             wsRef.current.send(JSON.stringify({ type: 'accept' }));
         } else if (negotiationId) {
             fetch(`${API_BASE}/api/negotiations/${negotiationId}/accept`, {
-                method: 'POST', credentials: 'include',
-                headers: { 'Content-Type': 'application/json' },
+                method: 'POST',
+                headers: authHeaders(),
                 body: '{}',
             }).then(() => setNegotiationStatus('accepted'));
         }
@@ -365,7 +395,8 @@ const JobDetail: React.FC = () => {
             wsRef.current.send(JSON.stringify({ type: 'reject' }));
         } else if (negotiationId) {
             fetch(`${API_BASE}/api/negotiations/${negotiationId}/reject`, {
-                method: 'POST', credentials: 'include',
+                method: 'POST',
+                headers: authHeaders(),
             });
         }
         setShowNegotiationChat(false);

@@ -4,7 +4,7 @@ Messages are held in-memory per session while the chat is active,
 then flushed to MongoDB as a single JSON doc when the session ends.
 """
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, status, Cookie, Header
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Any
 from pydantic import BaseModel, Field
 from datetime import datetime
 from bson import ObjectId
@@ -14,6 +14,7 @@ from app.core.config import settings
 from app.api.notifications import NotificationManager
 import json
 import asyncio
+import uuid
 
 router = APIRouter(prefix="/api/negotiations", tags=["Negotiations"])
 
@@ -28,7 +29,7 @@ active_sessions: Dict[str, dict] = {}
 async def get_current_user(
     access_token: Optional[str] = Cookie(None, alias=settings.COOKIE_NAME),
     authorization: Optional[str] = Header(None),
-):
+) -> Dict[str, Any]:
     token = access_token
     if not token and authorization:
         parts = authorization.split()
@@ -42,7 +43,7 @@ async def get_current_user(
     return user
 
 
-async def auth_from_token(token: str):
+async def auth_from_token(token: str) -> Optional[Dict[str, Any]]:
     """Authenticate from a raw token string (for WebSocket query params)."""
     if not token:
         return None
@@ -113,8 +114,8 @@ async def _broadcast(negotiation_id: str, message: dict, exclude_uid: Optional[s
     if not session:
         return
     dead = []
-    for uid, ws in session.get("connections", {}).items():
-        if uid == exclude_uid:
+    for uid, ws in list(session.get("connections", {}).items()):
+        if exclude_uid and uid == exclude_uid:
             continue
         try:
             await ws.send_json(message)
@@ -195,6 +196,51 @@ async def start_negotiation(
         },
     }
 
+    # ── Application Sync ──
+    # Ensure worker appears in employer's applicant list
+    try:
+        app_col = Database.get_collection("applications")
+        job_col = Database.get_collection("jobs")
+        
+        # Check if application already exists
+        existing_app = await app_col.find_one({
+            "job_id": body.job_id,
+            "$or": [{"worker_id": user["user_id"]}, {"applicant_id": user["user_id"]}]
+        })
+        
+        if not existing_app:
+            # Create a "negotiating" application status
+            # We fetch job details for the snapshot
+            job_doc = await job_col.find_one({"_id": ObjectId(body.job_id)})
+            if job_doc:
+                new_app = {
+                    "worker_id": user["user_id"],
+                    "applicant_id": user["user_id"],
+                    "applicant_name": doc["worker_name"],
+                    "applicant_contact": user.get("email", ""),
+                    "job_id": body.job_id,
+                    "provider_id": body.employer_id,
+                    "status": "negotiating",
+                    "applied_at": datetime.utcnow(),
+                    "created_at": datetime.utcnow(),
+                    "updated_at": datetime.utcnow(),
+                    "job_snapshot": {
+                        "title": job_doc.get("title", ""),
+                        "location": job_doc.get("location", {}).get("address", ""),
+                        "type": job_doc.get("job_type", "daily"),
+                        "cover_image": job_doc.get("cover_image")
+                    },
+                    "messages": [first_msg]
+                }
+                await app_col.insert_one(new_app)
+                # Add to job.applicants list for employer visibility
+                await job_col.update_one(
+                    {"_id": ObjectId(body.job_id)},
+                    {"$push": {"applicants": user["user_id"]}}
+                )
+    except Exception as e:
+        print(f"Error syncing application on negotiation start: {e}")
+
     # Notify employer
     try:
         notif = {
@@ -203,6 +249,7 @@ async def start_negotiation(
             "message": f"{doc['worker_name']} wants to negotiate the price for your job",
             "negotiation_id": neg_id,
             "job_id": body.job_id,
+            "worker_id": user["user_id"], # Added for frontend deep linking
         }
         await _notif_col().insert_one({
             "user_id": body.employer_id,
@@ -210,7 +257,10 @@ async def start_negotiation(
             "read": False,
             "created_at": datetime.utcnow(),
         })
-        await NotificationManager.send_personal_message(body.employer_id, notif)
+        await NotificationManager.send_personal_message(body.employer_id, {
+            "type": "personal_notification",
+            "data": notif
+        })
     except Exception:
         pass
 
@@ -544,7 +594,9 @@ async def negotiation_ws(ws: WebSocket, negotiation_id: str, token: str = ""):
             msg_type = data.get("type", "message")
 
             if msg_type == "message":
+                msg_id = f"{datetime.utcnow().isoformat()}-{uid}"
                 msg = {
+                    "id": msg_id,
                     "sender_id": uid,
                     "sender_role": role,
                     "sender_name": sender_name,
@@ -554,16 +606,11 @@ async def negotiation_ws(ws: WebSocket, negotiation_id: str, token: str = ""):
                 }
                 session["messages"].append(msg)
 
-                # Broadcast to all (including sender for confirmation)
+                # Broadcast to ALL connections (including sender) for real-time display
                 await _broadcast(negotiation_id, {
                     "type": "message",
                     **msg,
                 })
-                # Also send to sender
-                try:
-                    await ws.send_json({"type": "message", **msg})
-                except Exception:
-                    pass
 
             elif msg_type == "accept":
                 # Find final price

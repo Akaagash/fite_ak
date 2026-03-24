@@ -383,23 +383,35 @@ const ExploreJobs: React.FC = () => {
         const token = localStorage.getItem('token') || '';
         const ws = new WebSocket(`${WS_BASE}/api/negotiations/ws/${negId}?token=${token}`);
         
+        ws.onopen = () => console.log('Negotiation WS connected (worker)');
+
         ws.onmessage = (event) => {
-            const data = JSON.parse(event.data);
-            if (data.type === 'history') {
-                const msgs = (data.messages || []).map(mapWsMessage);
-                setNegotiationMessages(msgs);
-                setNegotiationStatus(data.status || 'active');
-            } else if (data.type === 'message') {
-                setNegotiationMessages(prev => {
-                    if (prev.some(m => m.id === `${data.sent_at}-${data.sender_id}`)) return prev; // dedup
-                    return [...prev, mapWsMessage(data)];
-                });
-            } else if (data.type === 'accepted') {
-                setNegotiationStatus('accepted');
-            } else if (data.type === 'session_ended') {
-                setNegotiationStatus(data.status || 'closed');
+            try {
+                const data = JSON.parse(event.data);
+                if (data.type === 'history') {
+                    const msgs = (data.messages || []).map(mapWsMessage);
+                    setNegotiationMessages(msgs);
+                    setNegotiationStatus(data.status || 'active');
+                } else if (data.type === 'message') {
+                    setNegotiationMessages(prev => {
+                        const key = `${data.sent_at}-${data.sender_id}`;
+                        if (prev.some(m => m.id === key)) return prev; // dedup
+                        return [...prev, mapWsMessage(data)];
+                    });
+                } else if (data.type === 'accepted') {
+                    setNegotiationStatus('accepted');
+                } else if (data.type === 'session_ended') {
+                    setNegotiationStatus(data.status || 'closed');
+                }
+            } catch (e) {
+                console.error('WS parse error', e);
             }
         };
+
+        ws.onerror = (err) => console.error('WS error (worker)', err);
+
+        ws.onclose = () => console.log('Negotiation WS closed (worker)');
+
         wsRef.current = ws;
     };
 
@@ -416,6 +428,11 @@ const ExploreJobs: React.FC = () => {
     useEffect(() => {
         return () => wsRef.current?.close();
     }, []);
+
+    const authHeaders = () => {
+        const token = localStorage.getItem('token') || '';
+        return { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+    };
 
     const handleSendNegotiationMessage = async (msgText: string = negotiationReason, offerAmount?: number) => {
         if (!negotiatingJob || isSendingMessage) return;
@@ -434,8 +451,7 @@ const ExploreJobs: React.FC = () => {
                 // Start new negotiation then connect WS
                 const res = await fetch(`${API_BASE}/api/negotiations/start`, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    credentials: 'include',
+                    headers: authHeaders(),
                     body: JSON.stringify({
                         job_id: negotiatingJob.id,
                         employer_id: negotiatingJob.employer_id || '',
@@ -454,8 +470,7 @@ const ExploreJobs: React.FC = () => {
                 // Fallback REST if WS disconnected but ID exists
                 const res = await fetch(`${API_BASE}/api/negotiations/${negotiationId}/message`, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    credentials: 'include',
+                    headers: authHeaders(),
                     body: JSON.stringify({ message: msgText, offer_amount: offerAmount }),
                 });
                 if (!res.ok) throw new Error('Failed to send message');
@@ -474,7 +489,7 @@ const ExploreJobs: React.FC = () => {
             wsRef.current.send(JSON.stringify({ type: 'accept' }));
         } else {
             try {
-                await fetch(`${API_BASE}/api/negotiations/${negotiationId}/accept`, { method: 'POST', credentials: 'include' });
+                await fetch(`${API_BASE}/api/negotiations/${negotiationId}/accept`, { method: 'POST', headers: authHeaders() });
             } catch { /* ignore */ }
         }
         setNegotiationStatus('accepted');
