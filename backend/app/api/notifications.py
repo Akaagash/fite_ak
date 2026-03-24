@@ -16,6 +16,7 @@ async def _auth_token(token: str):
 class NotificationManager:
     @staticmethod
     async def send_personal_message(user_id: str, message: dict):
+        """Send a message to all active WebSocket connections for a specific user."""
         if user_id in active_connections:
             websockets = active_connections[user_id]
             dead = []
@@ -24,8 +25,10 @@ class NotificationManager:
                     await ws.send_json(message)
                 except Exception:
                     dead.append(ws)
+            # Cleanup dead connections
             for ws in dead:
-                websockets.remove(ws)
+                if ws in websockets:
+                    websockets.remove(ws)
             if not websockets:
                 active_connections.pop(user_id, None)
 

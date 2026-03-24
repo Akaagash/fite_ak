@@ -509,17 +509,22 @@ async def send_fallback_message(
         "sent_at": datetime.utcnow().isoformat(),
     }
 
-    # If active in-memory session exists, append there and broadcast
-    session = active_sessions.get(negotiation_id)
-    if session:
-        session["messages"].append(msg)
-        await _broadcast(negotiation_id, {"type": "message", **msg})
-    else:
-        # Otherwise append directly to DB
-        await col.update_one(
-            {"_id": ObjectId(negotiation_id)},
-            {"$push": {"messages": msg}, "$set": {"updated_at": datetime.utcnow()}}
-        )
+    # ALSO Notify other party via global notification
+    other_id = neg["employer_id"] if role == "worker" else neg["worker_id"]
+    try:
+        await NotificationManager.send_personal_message(other_id, {
+            "type": "personal_notification",
+            "data": {
+                "type": "negotiation_message",
+                "title": f"New message from {sender_name}",
+                "message": msg["message"] or "(Price Update)",
+                "negotiation_id": negotiation_id,
+                "job_id": neg["job_id"],
+                "worker_id": neg["worker_id"],
+            }
+        })
+    except Exception:
+        pass
 
     return {"message": "Message sent successfully", "msg": msg}
 
@@ -614,6 +619,23 @@ async def negotiation_ws(ws: WebSocket, negotiation_id: str, token: str = ""):
                     "type": "message",
                     **msg,
                 })
+
+                # ALSO send a global personal notification to the OTHER party
+                other_id = session["meta"]["employer_id"] if role == "worker" else session["meta"]["worker_id"]
+                try:
+                    await NotificationManager.send_personal_message(other_id, {
+                        "type": "personal_notification",
+                        "data": {
+                            "type": "negotiation_message",
+                            "title": f"New message from {sender_name}",
+                            "message": data.get("message", "(Offer/Price Update)") if not data.get("message") else data.get("message"),
+                            "negotiation_id": negotiation_id,
+                            "job_id": neg.get("job_id"),
+                            "worker_id": session["meta"]["worker_id"],
+                        }
+                    })
+                except Exception:
+                    pass
 
             elif msg_type == "accept":
                 # Find final price

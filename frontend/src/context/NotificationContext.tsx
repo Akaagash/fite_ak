@@ -73,7 +73,7 @@ export const NotificationProvider: React.FC<{ children: React.ReactNode }> = ({ 
     };
 
     const handleNotificationClick = (notif: NotificationMessage) => {
-        if (notif.type === 'negotiation_started' && notif.job_id) {
+        if ((notif.type === 'negotiation_started' || notif.type === 'negotiation_message') && notif.job_id) {
             navigate('/posted-jobs', { state: { openJobId: notif.job_id, workerId: notif.worker_id } });
         }
         removeNotification(notif.id);
