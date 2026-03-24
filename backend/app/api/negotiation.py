@@ -76,7 +76,7 @@ def _serialize(doc):
     return doc
 
 
-async def _flush_session(negotiation_id: str, final_status: str = "closed", final_price: float = None):
+async def _flush_session(negotiation_id: str, final_status: str = "closed", final_price: Optional[float] = None):
     """Save in-memory messages to MongoDB and clean up the session."""
     session = active_sessions.get(negotiation_id)
     if not session:
@@ -106,7 +106,7 @@ async def _flush_session(negotiation_id: str, final_status: str = "closed", fina
     active_sessions.pop(negotiation_id, None)
 
 
-async def _broadcast(negotiation_id: str, message: dict, exclude_uid: str = None):
+async def _broadcast(negotiation_id: str, message: dict, exclude_uid: Optional[str] = None):
     """Broadcast a message to all WebSocket clients in a session."""
     session = active_sessions.get(negotiation_id)
     if not session:
@@ -412,6 +412,52 @@ async def get_my_negotiations(
     return {"negotiations": negs, "count": len(negs)}
 
 
+@router.post("/{negotiation_id}/message")
+async def send_fallback_message(
+    negotiation_id: str,
+    body: dict,
+    access_token: Optional[str] = Cookie(None, alias=settings.COOKIE_NAME),
+    authorization: Optional[str] = Header(None),
+):
+    """Fallback REST endpoint for sending a message if WS is not ready."""
+    user = await get_current_user(access_token, authorization)
+    col = _col()
+    
+    neg = await col.find_one({"_id": ObjectId(negotiation_id)})
+    if not neg:
+        raise HTTPException(status_code=404, detail="Negotiation not found")
+        
+    uid = user["user_id"]
+    if uid != neg["worker_id"] and uid != neg["employer_id"]:
+        raise HTTPException(status_code=403, detail="Not a party to this negotiation")
+
+    role = "worker" if uid == neg["worker_id"] else "employer"
+    sender_name = user.get("full_name") or user.get("email", "").split("@")[0] or role.title()
+
+    msg = {
+        "sender_id": uid,
+        "sender_role": role,
+        "sender_name": sender_name,
+        "message": body.get("message", ""),
+        "offer_amount": body.get("offer_amount"),
+        "sent_at": datetime.utcnow().isoformat(),
+    }
+
+    # If active in-memory session exists, append there and broadcast
+    session = active_sessions.get(negotiation_id)
+    if session:
+        session["messages"].append(msg)
+        await _broadcast(negotiation_id, {"type": "message", **msg})
+    else:
+        # Otherwise append directly to DB
+        await col.update_one(
+            {"_id": ObjectId(negotiation_id)},
+            {"$push": {"messages": msg}, "$set": {"updated_at": datetime.utcnow()}}
+        )
+
+    return {"message": "Message sent successfully", "msg": msg}
+
+
 # ── WebSocket Endpoint ────────────────────────────────────────────────────
 
 @router.websocket("/ws/{negotiation_id}")
@@ -541,8 +587,26 @@ async def negotiation_ws(ws: WebSocket, negotiation_id: str, token: str = ""):
         # Remove this connection
         if negotiation_id in active_sessions:
             active_sessions[negotiation_id]["connections"].pop(uid, None)
-            # If no connections left, flush after a delay
+            
+            # If no connections left, initiate a delayed background flush to persist to DB
             if not active_sessions[negotiation_id]["connections"]:
-                # Don't flush immediately — the other party may reconnect
-                # Just leave messages in memory; they'll be flushed on accept/reject
-                pass
+                async def _delayed_flush(nid: str):
+                    await asyncio.sleep(10)  # Wait 10 seconds for potential reconnects
+                    if nid in active_sessions and not active_sessions[nid]["connections"]:
+                        # Still no connections, flush safely to DB
+                        # Note: We fetch current status to ensure we don't accidentally close an active negotiation
+                        col_local = _col()
+                        neg_local = await col_local.find_one({"_id": ObjectId(nid)})
+                        if neg_local:
+                            current_status = neg_local.get("status", "active")
+                            # Just flush the messages without changing status, 
+                            # we leave it active but stored nicely.
+                            await col_local.update_one(
+                                {"_id": ObjectId(nid)},
+                                {"$set": {"messages": active_sessions[nid]["messages"], "updated_at": datetime.utcnow()}}
+                            )
+                            # Remove from memory to save RAM
+                            active_sessions.pop(nid, None)
+
+                asyncio.create_task(_delayed_flush(negotiation_id))
+
