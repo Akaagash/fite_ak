@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
-import { X, Maximize2, Minimize2, Send, IndianRupee, MessageCircle, AlertCircle, CheckCircle, Clock } from 'lucide-react';
+import { motion, useDragControls } from 'framer-motion';
+import { X, Minimize2, Send, MessageCircle, CheckCircle, Clock } from 'lucide-react';
 
 export interface NegotiationMessage {
     id: string;
@@ -39,6 +39,7 @@ const FloatingChatWidget: React.FC<FloatingChatWidgetProps> = ({
     const [messageInput, setMessageInput] = useState('');
     const [offerPrice, setOfferPrice] = useState<string>('');
     const messagesEndRef = useRef<HTMLDivElement>(null);
+    const dragControls = useDragControls();
 
     useEffect(() => {
         if (isExpanded) {
@@ -105,7 +106,8 @@ const FloatingChatWidget: React.FC<FloatingChatWidgetProps> = ({
     return (
         <motion.div
             drag
-            dragHandle=".drag-handle"
+            dragControls={dragControls}
+            dragListener={false}
             dragConstraints={{ left: -500, right: 100, top: -500, bottom: 100 }}
             dragElastic={0.1}
             dragMomentum={false}
@@ -116,7 +118,10 @@ const FloatingChatWidget: React.FC<FloatingChatWidgetProps> = ({
             style={{ touchAction: "none" }}
         >
             {/* Header */}
-            <div className="drag-handle bg-neutral-900 text-white p-4 flex items-center justify-between cursor-grab active:cursor-grabbing shrink-0 z-10">
+            <div 
+                className="bg-neutral-900 text-white p-4 flex items-center justify-between cursor-grab active:cursor-grabbing shrink-0 z-10"
+                onPointerDown={(e) => dragControls.start(e)}
+            >
                 <div className="flex items-center gap-3 overflow-hidden">
                     <div className="w-10 h-10 bg-indigo-500 rounded-full flex items-center justify-center shrink-0">
                         <MessageCircle size={20} className="text-white" />
