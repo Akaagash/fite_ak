@@ -14,15 +14,8 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
 const WS_BASE = API_BASE.replace(/^http/, 'ws');
 
 // Negotiation types
-interface NegotiationMessage {
-    id: string;
-    sender: 'worker' | 'employer';
-    senderName: string;
-    message: string;
-    timestamp: string;
-    type: 'message' | 'price_update' | 'acceptance' | 'counter_offer';
-    priceProposal?: number;
-}
+import FloatingChatWidget from '../../components/ui/FloatingChatWidget';
+import type { NegotiationMessage } from '../../components/ui/FloatingChatWidget';
 
 
 interface Job {
@@ -423,19 +416,16 @@ const ExploreJobs: React.FC = () => {
         return () => wsRef.current?.close();
     }, []);
 
-    const handleSendNegotiationMessage = async () => {
-        if (!negotiatingJob || !negotiationReason.trim() || isSendingMessage) return;
+    const handleSendNegotiationMessage = async (msgText: string = negotiationReason, offerAmount?: number) => {
+        if (!negotiatingJob || isSendingMessage) return;
         setIsSendingMessage(true);
 
         try {
-            const priceMatch = negotiationReason.match(/₹(\d+)/);
-            const offerAmount = priceMatch ? parseFloat(priceMatch[1]) : undefined;
-
             if (wsRef.current?.readyState === WebSocket.OPEN) {
                 // Send via WS if connected
                 wsRef.current.send(JSON.stringify({
                     type: 'message',
-                    message: negotiationReason,
+                    message: msgText,
                     offer_amount: offerAmount,
                 }));
                 setNegotiationReason('');
@@ -450,7 +440,7 @@ const ExploreJobs: React.FC = () => {
                         employer_id: negotiatingJob.employer_id || '',
                         employer_name: negotiatingJob.employer,
                         original_price: negotiatingJob.salaryAmount,
-                        message: negotiationReason,
+                        message: msgText,
                         offer_amount: offerAmount,
                     }),
                 });
@@ -465,7 +455,7 @@ const ExploreJobs: React.FC = () => {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     credentials: 'include',
-                    body: JSON.stringify({ message: negotiationReason, offer_amount: offerAmount }),
+                    body: JSON.stringify({ message: msgText, offer_amount: offerAmount }),
                 });
                 if (!res.ok) throw new Error('Failed to send message');
                 setNegotiationReason('');
@@ -1378,165 +1368,23 @@ const ExploreJobs: React.FC = () => {
             {/* Price Negotiation Chat Modal */}
             <AnimatePresence>
                 {showNegotiationModal && negotiatingJob && (
-                    <>
-                        <motion.div
-                            initial={{ opacity: 0 }}
-                            animate={{ opacity: 1 }}
-                            exit={{ opacity: 0 }}
-                            className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[100]"
-                            onClick={handleRejectNegotiation}
-                        />
-                        <motion.div
-                            initial={{ opacity: 0, y: 40 }}
-                            animate={{ opacity: 1, y: 0 }}
-                            exit={{ opacity: 0, y: 40 }}
-                            transition={{ type: 'spring', stiffness: 400, damping: 32 }}
-                            className="fixed bottom-0 left-0 right-0 sm:bottom-auto sm:top-1/2 sm:left-1/2 sm:-translate-x-1/2 sm:-translate-y-1/2 w-full sm:w-[90vw] sm:max-w-lg z-[101]"
-                        >
-                            <div className="rounded-t-2xl sm:rounded-2xl bg-white border border-neutral-200 shadow-2xl overflow-hidden flex flex-col" style={{ maxHeight: '85vh' }}>
-                                {/* Header */}
-                                <div className="px-5 py-4 border-b border-neutral-100 flex items-center justify-between bg-white">
-                                    <div>
-                                        <h3 className="text-base font-bold text-neutral-900">Negotiate Price</h3>
-                                        <p className="text-xs text-neutral-500 mt-0.5">{negotiatingJob.title} · {negotiatingJob.employer}</p>
-                                    </div>
-                                    <button
-                                        onClick={handleRejectNegotiation}
-                                        className="p-1.5 rounded-lg hover:bg-neutral-100 transition-colors"
-                                    >
-                                        <X size={18} className="text-neutral-500" />
-                                    </button>
-                                </div>
-
-                                {/* Chat Messages */}
-                                <div className="flex-1 overflow-y-auto px-5 py-4 space-y-3 bg-neutral-50" style={{ minHeight: '240px', maxHeight: '380px' }}>
-                                    {/* System message showing base rate */}
-                                    <div className="flex justify-center">
-                                        <span className="text-xs text-neutral-400 bg-white px-3 py-1 rounded-full border border-neutral-100">Base rate: ₹{negotiatingJob.salaryAmount}/day</span>
-                                    </div>
-
-                                    {negotiationMessages.length === 0 ? (
-                                        <div className="flex flex-col items-center justify-center py-8 text-center">
-                                            <div className="w-10 h-10 rounded-full bg-neutral-100 flex items-center justify-center mb-3">
-                                                <IndianRupee size={18} className="text-neutral-400" />
-                                            </div>
-                                            <p className="text-sm text-neutral-500">Type your price proposal to start negotiating</p>
-                                            <p className="text-xs text-neutral-400 mt-1">Tip: Include ₹ amount in your message, e.g. "I'd like ₹600/day"</p>
-                                        </div>
-                                    ) : (
-                                        <>
-                                            {negotiationMessages.map((msg) => (
-                                                <motion.div
-                                                    key={msg.id}
-                                                    initial={{ opacity: 0, y: 8 }}
-                                                    animate={{ opacity: 1, y: 0 }}
-                                                    className={`flex ${msg.sender === 'worker' ? 'justify-end' : 'justify-start'}`}
-                                                >
-                                                    <div className={`max-w-[75%] px-3.5 py-2.5 rounded-2xl text-sm ${
-                                                        msg.sender === 'worker'
-                                                            ? 'bg-neutral-900 text-white rounded-br-md'
-                                                            : 'bg-white text-neutral-800 border border-neutral-200 rounded-bl-md shadow-sm'
-                                                    }`}>
-                                                        {msg.priceProposal && (
-                                                            <div className={`text-xs font-bold mb-1 ${msg.sender === 'worker' ? 'text-emerald-300' : 'text-amber-600'}`}>
-                                                                ₹{msg.priceProposal}/day
-                                                            </div>
-                                                        )}
-                                                        <p>{msg.message}</p>
-                                                        <p className="text-[10px] mt-1.5 text-neutral-400">{msg.timestamp}</p>
-                                                    </div>
-                                                </motion.div>
-                                            ))}
-
-                                            {/* Waiting indicator */}
-                                            {negotiationStatus === 'waiting_employer' && (
-                                                <div className="flex justify-start">
-                                                    <div className="bg-white border border-neutral-200 rounded-2xl rounded-bl-md px-4 py-3 shadow-sm">
-                                                        <div className="flex items-center gap-2">
-                                                            <div className="flex gap-1">
-                                                                <span className="w-1.5 h-1.5 bg-neutral-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                                                                <span className="w-1.5 h-1.5 bg-neutral-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                                                                <span className="w-1.5 h-1.5 bg-neutral-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
-                                                            </div>
-                                                            <span className="text-xs text-neutral-500">Waiting for employer to respond...</span>
-                                                        </div>
-                                                    </div>
-                                                </div>
-                                            )}
-
-                                            {/* Accepted indicator */}
-                                            {negotiationStatus === 'accepted' && (
-                                                <div className="flex justify-center">
-                                                    <span className="text-xs text-emerald-600 bg-emerald-50 px-3 py-1.5 rounded-full border border-emerald-200 font-medium">✓ Price agreed! You can now proceed with the job.</span>
-                                                </div>
-                                            )}
-
-                                            {/* Rejected indicator */}
-                                            {negotiationStatus === 'rejected' && (
-                                                <div className="flex justify-center">
-                                                    <span className="text-xs text-red-600 bg-red-50 px-3 py-1.5 rounded-full border border-red-200 font-medium">Negotiation closed</span>
-                                                </div>
-                                            )}
-                                        </>
-                                    )}
-                                </div>
-
-                                {/* Input Area — disabled when waiting for employer or negotiation is over */}
-                                <div className="px-5 py-3 border-t border-neutral-100 bg-white">
-                                    {negotiationStatus === 'accepted' || negotiationStatus === 'rejected' ? (
-                                        <p className="text-xs text-neutral-400 text-center py-1">This negotiation is {negotiationStatus}</p>
-                                    ) : negotiationStatus === 'waiting_employer' ? (
-                                        <p className="text-xs text-neutral-400 text-center py-1">Waiting for employer's response before you can send another message</p>
-                                    ) : (
-                                        <div className="flex gap-2">
-                                            <input
-                                                type="text"
-                                                placeholder={negotiationId ? 'Type your message...' : 'Type your price proposal, e.g. I\'d like ₹600/day...'}
-                                                value={negotiationReason}
-                                                onChange={(e) => setNegotiationReason(e.target.value)}
-                                                onKeyDown={(e) => e.key === 'Enter' && !isSendingMessage && handleSendNegotiationMessage()}
-                                                disabled={isSendingMessage}
-                                                className="flex-1 px-3.5 py-2.5 rounded-xl border border-neutral-200 bg-neutral-50 focus:border-neutral-400 focus:bg-white focus:outline-none text-sm text-neutral-900 placeholder:text-neutral-400 transition-colors disabled:opacity-50"
-                                            />
-                                            <button
-                                                onClick={handleSendNegotiationMessage}
-                                                disabled={!negotiationReason.trim() || isSendingMessage}
-                                                className="px-4 py-2.5 rounded-xl bg-neutral-900 text-white text-sm font-medium hover:bg-neutral-800 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-                                            >
-                                                {isSendingMessage ? '...' : 'Send'}
-                                            </button>
-                                        </div>
-                                    )}
-                                </div>
-
-                                {/* Bottom Actions */}
-                                <div className="px-5 py-3 border-t border-neutral-100 bg-neutral-50 flex gap-2">
-                                    <button
-                                        onClick={handleRejectNegotiation}
-                                        className="flex-1 py-2.5 rounded-xl border border-neutral-200 text-neutral-600 text-sm font-medium hover:bg-neutral-100 transition-colors"
-                                    >
-                                        {negotiationId ? 'Close & Reject' : 'Cancel'}
-                                    </button>
-                                    {negotiationStatus === 'accepted' ? (
-                                        <button
-                                            onClick={handleProceedWithJob}
-                                            className="flex-1 py-2.5 rounded-xl bg-emerald-600 text-white text-sm font-semibold hover:bg-emerald-700 transition-colors"
-                                        >
-                                            Accept & Proceed ✓
-                                        </button>
-                                    ) : (
-                                        <button
-                                            onClick={handleAcceptNegotiatedPrice}
-                                            disabled={!negotiationMessages.some(m => m.type === 'counter_offer') || negotiationStatus === 'rejected'}
-                                            className="flex-1 py-2.5 rounded-xl bg-neutral-900 text-white text-sm font-semibold hover:bg-neutral-800 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-                                        >
-                                            Accept Offer
-                                        </button>
-                                    )}
-                                </div>
-                            </div>
-                        </motion.div>
-                    </>
+                    <FloatingChatWidget
+                        isOpen={showNegotiationModal}
+                        onClose={() => setShowNegotiationModal(false)}
+                        jobTitle={`${negotiatingJob.title} · ${negotiatingJob.employer}`}
+                        messages={negotiationMessages}
+                        status={negotiationStatus as any}
+                        isEmployer={false}
+                        onSendMessage={(msg, offer) => handleSendNegotiationMessage(msg, offer)}
+                        onAccept={(_price) => {
+                            // First accept the offer
+                            handleAcceptNegotiatedPrice().then(() => {
+                                // Once accepted, automatically apply to the job at this final price
+                                handleProceedWithJob();
+                            });
+                        }}
+                        onReject={handleRejectNegotiation}
+                    />
                 )}
             </AnimatePresence>
             </div>
